@@ -1,0 +1,17 @@
+{
+  "name": "image-edit-tool",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "server.mjs",
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.21.1",
+    "form-data": "^4.0.0",
+    "multer": "1.4.5-lts.1",
+    "node-fetch": "^3.3.2",
+    "pngjs": "^7.0.0"
+  }
+}

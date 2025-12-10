@@ -1,0 +1,995 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>In-/Outpainting Tool</title>
+    <style>
+      :root {
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+          sans-serif;
+        font-size: 14px;
+        color-scheme: dark;
+      }
+      body {
+        margin: 0;
+        padding: 0.75rem;
+        background: #0b0b0b;
+        color: #eee;
+        display: flex;
+        justify-content: center;
+      }
+      .app {
+        width: 100%;
+        max-width: 720px;
+      }
+      h1 {
+        margin: 0 0 0.75rem 0;
+        font-size: 1.1rem;
+        font-weight: 600;
+        letter-spacing: 0.02em;
+      }
+
+      .canvas-area {
+        position: relative;
+        border: 1px solid #333;
+        border-radius: 8px;
+        background: radial-gradient(circle at top, #222 0, #111 55%, #0a0a0a 100%);
+        overflow: hidden;
+      }
+      .canvas-inner {
+        position: relative;
+        width: 100%;
+      }
+      canvas {
+        display: block;
+        width: 100%;
+        height: auto;
+      }
+      #maskCanvas,
+      #cursorCanvas {
+        position: absolute;
+        left: 0;
+        top: 0;
+      }
+      #maskCanvas {
+        pointer-events: auto;
+        opacity: 0.6;
+      }
+      #cursorCanvas {
+        pointer-events: none;
+      }
+
+      .overlay-hint {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        text-align: center;
+        padding: 0.75rem;
+        font-size: 0.85rem;
+        color: #bbb;
+        pointer-events: none;
+        backdrop-filter: blur(2px);
+      }
+      .overlay-hint span {
+        opacity: 0.9;
+        margin: 0.1rem 0;
+      }
+      .overlay-hint strong {
+        color: #0af;
+        font-weight: 500;
+      }
+      .overlay-hint.hidden {
+        display: none;
+      }
+
+      #controls {
+        margin-top: 0.6rem;
+        display: none;
+        flex-direction: column;
+        gap: 0.45rem;
+      }
+
+      #prompt {
+        width: 100%;
+        min-height: 52px;
+        max-height: 100px;
+        resize: vertical;
+        font-size: 0.9rem;
+        padding: 0.4rem 0.45rem;
+        border-radius: 6px;
+        border: 1px solid #333;
+        background: #161616;
+        color: #eee;
+        box-sizing: border-box;
+      }
+
+      .control-row {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        justify-content: space-between;
+      }
+
+      .left-controls {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        flex: 1 1 auto;
+        flex-wrap: wrap;
+      }
+
+      .slider-wrap {
+        display: flex;
+        align-items: center;
+        gap: 0.25rem;
+        font-size: 0.8rem;
+        color: #aaa;
+        white-space: nowrap;
+        padding: 0.2rem 0.35rem;
+        border-radius: 999px;
+        background: #141414;
+        border: 1px solid #2b2b2b;
+      }
+      .slider-wrap span {
+        font-size: 0.95rem;
+      }
+      #brushSize {
+        width: 110px;
+      }
+
+      .engine-wrap {
+        display: flex;
+        align-items: center;
+        gap: 0.25rem;
+        font-size: 0.8rem;
+        color: #aaa;
+        white-space: nowrap;
+        padding: 0.2rem 0.35rem;
+        border-radius: 999px;
+        background: #141414;
+        border: 1px solid #2b2b2b;
+      }
+      #engineSelect {
+        font-size: 0.8rem;
+        background: black;
+        color: #eee;
+        border-radius: 999px;
+        border: 1px solid #333;
+        padding: 0.15rem 0.5rem;
+      }
+
+      .buttons {
+        display: flex;
+        gap: 0.3rem;
+      }
+      button {
+        padding: 0.3rem 0.55rem;
+        border-radius: 999px;
+        border: none;
+        cursor: pointer;
+        background: linear-gradient(135deg, #0af, #6cf);
+        color: #000;
+        font-size: 0.9rem;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-width: 2rem;
+        transition: transform 0.08s ease, box-shadow 0.08s ease,
+          background 0.12s ease;
+        box-shadow: 0 0 0 0 rgba(0, 170, 255, 0.4);
+      }
+      button.secondary {
+        background: #262626;
+        color: #eee;
+        box-shadow: none;
+      }
+      button:hover:not(:disabled) {
+        transform: translateY(-1px);
+        box-shadow: 0 4px 10px rgba(0, 170, 255, 0.35);
+      }
+      button.secondary:hover:not(:disabled) {
+        box-shadow: 0 3px 8px rgba(0, 0, 0, 0.5);
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: default;
+        transform: none;
+        box-shadow: none;
+      }
+
+      #status {
+        font-size: 0.75rem;
+        color: #aaa;
+        min-height: 1.2em;
+      }
+
+      .hint-card {
+        margin-top: 0.6rem;
+        padding: 0.7rem 0.8rem;
+        background: radial-gradient(circle at top left, #202020 0, #121212 60%);
+        border-radius: 8px;
+        border: 1px solid #2c2c2c;
+        font-size: 0.78rem;
+        color: #c0c0c0;
+      }
+      .hint-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 0.35rem;
+      }
+      .hint-title {
+        font-size: 0.8rem;
+        font-weight: 600;
+        letter-spacing: 0.03em;
+        text-transform: uppercase;
+        color: #f5f5f5;
+      }
+      .hint-badge {
+        font-size: 0.7rem;
+        padding: 0.1rem 0.4rem;
+        border-radius: 999px;
+        background: rgba(0, 170, 255, 0.09);
+        color: #9ddcff;
+        border: 1px solid rgba(0, 170, 255, 0.35);
+      }
+      .hint-list {
+        list-style: none;
+        padding: 0;
+        margin: 0.2rem 0 0;
+      }
+      .hint-list li {
+        display: flex;
+        align-items: flex-start;
+        gap: 0.35rem;
+        margin: 0.15rem 0;
+        line-height: 1.25;
+      }
+      .hint-icon {
+        font-size: 0.85rem;
+        margin-top: 0.03rem;
+      }
+      .hint-text-strong {
+        font-weight: 500;
+        color: #f0f0f0;
+      }
+      .hint-sub {
+        font-size: 0.74rem;
+        color: #9a9a9a;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="app">
+      <h1>In-/Outpainting Tool</h1>
+
+      <div id="canvasArea" class="canvas-area">
+        <div class="canvas-inner">
+          <canvas id="imageCanvas"></canvas>
+          <canvas id="maskCanvas"></canvas>
+          <canvas id="cursorCanvas"></canvas>
+        </div>
+        <div id="overlayHint" class="overlay-hint">
+          <span class="hint-text-strong">How to start</span>
+          <span>Open the page with a URL parameter, for example:</span>
+          <span><strong>?src=https://…/image.png</strong></span>
+          <span>Once the image is visible, you can paint your mask.</span>
+          <span>Inpainting is only available for whitelisted image hosts.</span>
+        </div>
+      </div>
+
+      <div id="controls">
+        <textarea
+          id="prompt"
+          placeholder="e.g. 'replace the background with a sunset beach scene'"
+        ></textarea>
+
+        <div class="control-row">
+          <div class="left-controls">
+            <div class="slider-wrap">
+              <span title="Brush size">🖌</span>
+              <input
+                type="range"
+                id="brushSize"
+                min="5"
+                max="80"
+                value="25"
+              />
+              <span id="brushSizeLabel">25 px</span>
+            </div>
+
+            <div class="engine-wrap">
+              <span title="Image engine">⚙</span>
+              <select id="engineSelect"></select>
+            </div>
+
+            <span id="status"></span>
+          </div>
+          <div class="buttons">
+            <button id="editBtn" title="Run in-/outpainting">
+              ✏️
+            </button>
+            <button
+              id="modeBtn"
+              class="secondary"
+              title="Mask mode: reveal areas to be edited"
+            >
+              ◎
+            </button>
+            <button
+              id="outBtn"
+              class="secondary"
+              title="Image mode: inpainting only inside the original image"
+            >
+              ▣
+            </button>
+            <button
+              id="resetBtn"
+              class="secondary"
+              title="Reset back to the original image"
+            >
+              ⟳
+            </button>
+            <button
+              id="downloadBtn"
+              class="secondary"
+              title="Download the current image as PNG"
+            >
+              ⬇
+            </button>
+          </div>
+        </div>
+
+        <div class="hint-card">
+          <div class="hint-header">
+            <div class="hint-title">Quick guide</div>
+            <div class="hint-badge">Workflow</div>
+          </div>
+          <ul class="hint-list">
+            <li>
+              <span class="hint-icon">1️⃣</span>
+              <span>
+                <span class="hint-text-strong">Load an image</span><br />
+                Call this page with <span class="hint-sub">?src=&lt;image-url&gt;</span>. The
+                image must come from an allowed host.
+              </span>
+            </li>
+            <li>
+              <span class="hint-icon">2️⃣</span>
+              <span>
+                <span class="hint-text-strong">Inpainting (✏️ + ◎)</span><br />
+                Use the brush to reveal the areas you want the AI to change. Dark
+                areas are protected.
+              </span>
+            </li>
+            <li>
+              <span class="hint-icon">3️⃣</span>
+              <span>
+                <span class="hint-text-strong">Outpainting (⛶)</span><br />
+                Shrinks the image and lets the AI extend the borders with smooth
+                transitions. The brush is disabled in this mode.
+              </span>
+            </li>
+            <li>
+              <span class="hint-icon">4️⃣</span>
+              <span>
+                <span class="hint-text-strong">Host restrictions</span><br />
+                If the image host is not whitelisted, the ✏️ button stays
+                disabled and the tool acts as a viewer only.
+              </span>
+            </li>
+          </ul>
+        </div>
+      </div>
+
+      <script>
+        const CANVAS_SIZE = 1024;
+        const OUTPAINT_SCALE = 0.8;
+        const OUTPAINT_FEATHER = 4;
+
+        const canvasArea = document.getElementById("canvasArea");
+        const imageCanvas = document.getElementById("imageCanvas");
+        const maskCanvas = document.getElementById("maskCanvas");
+        const cursorCanvas = document.getElementById("cursorCanvas");
+        const overlayHint = document.getElementById("overlayHint");
+        const controlsEl = document.getElementById("controls");
+        const promptInput = document.getElementById("prompt");
+        const editBtn = document.getElementById("editBtn");
+        const modeBtn = document.getElementById("modeBtn");
+        const outBtn = document.getElementById("outBtn");
+        const resetBtn = document.getElementById("resetBtn");
+        const downloadBtn = document.getElementById("downloadBtn");
+        const statusEl = document.getElementById("status");
+        const brushSizeSlider = document.getElementById("brushSize");
+        const brushSizeLabel = document.getElementById("brushSizeLabel");
+        const engineSelect = document.getElementById("engineSelect");
+
+        const imgCtx = imageCanvas.getContext("2d");
+        const maskCtx = maskCanvas.getContext("2d");
+        const cursorCtx = cursorCanvas.getContext("2d");
+
+        let imageLoaded = false;
+        let drawing = false;
+        let brushSize = parseInt(brushSizeSlider.value, 10) || 25;
+
+        let drawOffsetX = 0;
+        let drawOffsetY = 0;
+        let drawWidth = 0;
+        let drawHeight = 0;
+
+        let originalImageSrc = null;
+        let maskMode = "erase";
+        let outpaintMode = false;
+        let baseImageForOutpaint = null;
+        let contentRect = { x: 0, y: 0, w: CANVAS_SIZE, h: CANVAS_SIZE };
+        let contentRectForOutpaint = null;
+
+        let hostsWhitelist = [];
+        let originHost = null;
+        let allowEdit = false;
+        let configLoaded = false;
+
+        function initCanvases() {
+          imageCanvas.width = CANVAS_SIZE;
+          imageCanvas.height = CANVAS_SIZE;
+          maskCanvas.width = CANVAS_SIZE;
+          maskCanvas.height = CANVAS_SIZE;
+          cursorCanvas.width = CANVAS_SIZE;
+          cursorCanvas.height = CANVAS_SIZE;
+        }
+
+        function updateBrushLabel() {
+          brushSizeLabel.textContent = `${brushSize} px`;
+        }
+
+        brushSizeSlider.addEventListener("input", () => {
+          brushSize = parseInt(brushSizeSlider.value, 10) || 25;
+          updateBrushLabel();
+        });
+        updateBrushLabel();
+
+        function updateMaskModeButton() {
+          if (maskMode === "erase") {
+            modeBtn.title = "Mask mode: reveal areas to be edited";
+            modeBtn.textContent = "◎";
+          } else {
+            modeBtn.title = "Mask mode: protect areas (do not edit)";
+            modeBtn.textContent = "◉";
+          }
+        }
+        updateMaskModeButton();
+
+        function updateOutpaintButton() {
+          if (outpaintMode) {
+            outBtn.textContent = "⛶";
+            outBtn.title =
+              "Image mode: outpainting (image shrinks, borders are extended by the AI, brush disabled)";
+            maskCanvas.style.pointerEvents = "none";
+          } else {
+            outBtn.textContent = "▣";
+            outBtn.title =
+              "Image mode: inpainting (only within the original image, brush enabled)";
+            maskCanvas.style.pointerEvents = "auto";
+          }
+        }
+        updateOutpaintButton();
+
+        modeBtn.addEventListener("click", () => {
+          if (outpaintMode) {
+            statusEl.textContent =
+              "Outpainting is active – the brush is disabled. Turn off outpainting to paint.";
+            return;
+          }
+          maskMode = maskMode === "erase" ? "restore" : "erase";
+          updateMaskModeButton();
+        });
+
+        outBtn.addEventListener("click", () => {
+          if (!imageLoaded) return;
+
+          if (!outpaintMode) {
+            outpaintMode = true;
+            updateOutpaintButton();
+            baseImageForOutpaint = imageCanvas.toDataURL("image/png");
+            contentRectForOutpaint = { ...contentRect };
+
+            loadImageFromSrc(baseImageForOutpaint, {
+              scaleMode: "shrinkForOutpaint",
+              maskMode: "borderOutpaint",
+              contentRectForMask: contentRectForOutpaint
+            });
+          } else {
+            outpaintMode = false;
+            updateOutpaintButton();
+
+            const src =
+              baseImageForOutpaint || imageCanvas.toDataURL("image/png");
+            baseImageForOutpaint = null;
+            contentRectForOutpaint = null;
+
+            loadImageFromSrc(src, {
+              scaleMode: "fit",
+              maskMode: "fullBlack"
+            });
+          }
+        });
+
+        function recomputeAccessState() {
+          const normalizedHost = originHost ? originHost.toLowerCase() : null;
+          const normalizedWhitelist = hostsWhitelist.map((h) =>
+            String(h).toLowerCase()
+          );
+
+          const isTrusted =
+            normalizedHost && normalizedWhitelist.includes(normalizedHost);
+
+          allowEdit = !!(imageLoaded && isTrusted);
+
+          editBtn.disabled = !allowEdit;
+
+          if (!imageLoaded) {
+            statusEl.textContent = "Waiting for image…";
+          } else if (!originHost) {
+            statusEl.textContent =
+              "Image loaded, but host could not be determined – editing disabled.";
+          } else if (!isTrusted) {
+            statusEl.textContent =
+              "Image host '" +
+              originHost +
+              "' is not whitelisted – view only, inpainting disabled.";
+          } else {
+            statusEl.textContent =
+              "Host '" + originHost + "' is whitelisted – inpainting enabled.";
+          }
+        }
+
+        async function fetchConfig() {
+          try {
+            const res = await fetch("/api/config");
+            if (!res.ok) {
+              throw new Error("Config request failed");
+            }
+            const data = await res.json();
+            hostsWhitelist = data.hostsWhitelist || [];
+            configLoaded = true;
+
+            const engines = data.engines || [];
+            const defaultEngineId = data.defaultEngineId || null;
+
+            engineSelect.innerHTML = "";
+
+            if (!engines.length) {
+              const opt = document.createElement("option");
+              opt.value = "";
+              opt.textContent = "No engines configured";
+              engineSelect.appendChild(opt);
+              engineSelect.disabled = true;
+            } else {
+              for (const e of engines) {
+                const opt = document.createElement("option");
+                opt.value = e.id;
+                opt.textContent = e.label || e.id;
+                engineSelect.appendChild(opt);
+              }
+              if (defaultEngineId) {
+                engineSelect.value = defaultEngineId;
+              }
+            }
+
+            recomputeAccessState();
+          } catch (e) {
+            console.error("Failed to load config:", e);
+            engineSelect.innerHTML = "";
+            const opt = document.createElement("option");
+            opt.value = "";
+            opt.textContent = "Config error";
+            engineSelect.appendChild(opt);
+            engineSelect.disabled = true;
+            statusEl.textContent =
+              "Error while loading configuration (see console).";
+          }
+        }
+
+        function loadImageFromSrc(src, options = {}) {
+          const {
+            scaleMode = "fit",
+            maskMode = "fullBlack",
+            contentRectForMask = null
+          } = options;
+
+          const img = new Image();
+          img.onload = () => {
+            initCanvases();
+
+            imgCtx.setTransform(1, 0, 0, 1, 0, 0);
+            imgCtx.clearRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
+            imgCtx.fillStyle = "black";
+            imgCtx.fillRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
+
+            const baseScale = Math.min(
+              CANVAS_SIZE / img.width,
+              CANVAS_SIZE / img.height
+            );
+
+            let scale = baseScale;
+            if (scaleMode === "shrinkForOutpaint") {
+              scale = baseScale * OUTPAINT_SCALE;
+            }
+
+            drawWidth = img.width * scale;
+            drawHeight = img.height * scale;
+            drawOffsetX = (CANVAS_SIZE - drawWidth) / 2;
+            drawOffsetY = (CANVAS_SIZE - drawHeight) / 2;
+
+            imgCtx.drawImage(
+              img,
+              0,
+              0,
+              img.width,
+              img.height,
+              drawOffsetX,
+              drawOffsetY,
+              drawWidth,
+              drawHeight
+            );
+
+            if (scaleMode === "fit") {
+              contentRect = {
+                x: drawOffsetX,
+                y: drawOffsetY,
+                w: drawWidth,
+                h: drawHeight
+              };
+            }
+
+            maskCtx.setTransform(1, 0, 0, 1, 0, 0);
+            maskCtx.globalCompositeOperation = "source-over";
+            maskCtx.clearRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
+
+            if (maskMode === "borderOutpaint") {
+              const inner =
+                contentRectForMask || {
+                  x: 0,
+                  y: 0,
+                  w: img.width,
+                  h: img.height
+                };
+
+              const sx = drawWidth / img.width;
+              const sy = drawHeight / img.height;
+
+              let innerX = drawOffsetX + inner.x * sx;
+              let innerY = drawOffsetY + inner.y * sy;
+              let innerW = inner.w * sx;
+              let innerH = inner.h * sy;
+
+              innerX += OUTPAINT_FEATHER;
+              innerY += OUTPAINT_FEATHER;
+              innerW -= OUTPAINT_FEATHER * 2;
+              innerH -= OUTPAINT_FEATHER * 2;
+
+              if (innerW < 0) innerW = 0;
+              if (innerH < 0) innerH = 0;
+
+              maskCtx.fillStyle = "rgba(0, 0, 0, 1)";
+              maskCtx.fillRect(innerX, innerY, innerW, innerH);
+            } else {
+              maskCtx.fillStyle = "rgba(0, 0, 0, 1)";
+              maskCtx.fillRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
+            }
+
+            cursorCtx.clearRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
+
+            overlayHint.classList.add("hidden");
+            controlsEl.style.display = "flex";
+
+            imageLoaded = true;
+            recomputeAccessState();
+          };
+
+          img.onerror = () => {
+            statusEl.textContent =
+              "Error loading image (CORS / same-origin restrictions?).";
+          };
+
+          img.crossOrigin = "anonymous";
+          img.src = src;
+        }
+
+        function getCanvasPos(evt) {
+          const rect = maskCanvas.getBoundingClientRect();
+          return {
+            x: ((evt.clientX - rect.left) / rect.width) * maskCanvas.width,
+            y: ((evt.clientY - rect.top) / rect.height) * maskCanvas.height
+          };
+        }
+
+        function drawCursor(evt) {
+          if (!imageLoaded || outpaintMode) {
+            cursorCtx.clearRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
+            return;
+          }
+          const pos = getCanvasPos(evt);
+          cursorCtx.clearRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
+          cursorCtx.beginPath();
+          cursorCtx.arc(pos.x, pos.y, brushSize, 0, Math.PI * 2);
+          cursorCtx.strokeStyle = "rgba(255,255,255,0.9)";
+          cursorCtx.lineWidth = 1;
+          cursorCtx.stroke();
+        }
+
+        function clearCursor() {
+          cursorCtx.clearRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
+        }
+
+        function startDraw(evt) {
+          if (!imageLoaded || outpaintMode) return;
+          drawing = true;
+          draw(evt);
+        }
+
+        function stopDraw() {
+          drawing = false;
+          maskCtx.beginPath();
+        }
+
+        function draw(evt) {
+          if (!drawing) return;
+          const pos = getCanvasPos(evt);
+
+          if (maskMode === "erase") {
+            maskCtx.globalCompositeOperation = "destination-out";
+            maskCtx.fillStyle = "rgba(0,0,0,1)";
+          } else {
+            maskCtx.globalCompositeOperation = "source-over";
+            maskCtx.fillStyle = "rgba(0,0,0,1)";
+          }
+
+          maskCtx.beginPath();
+          maskCtx.arc(pos.x, pos.y, brushSize, 0, Math.PI * 2);
+          maskCtx.fill();
+
+          drawCursor(evt);
+        }
+
+        maskCanvas.addEventListener("mousedown", (e) => startDraw(e));
+        window.addEventListener("mouseup", () => stopDraw());
+        maskCanvas.addEventListener("mousemove", (e) => {
+          if (drawing) draw(e);
+          else drawCursor(e);
+        });
+        maskCanvas.addEventListener("mouseleave", () => clearCursor());
+
+        maskCanvas.addEventListener("touchstart", (e) => {
+          e.preventDefault();
+          startDraw(e.touches[0]);
+        });
+        maskCanvas.addEventListener("touchend", (e) => {
+          e.preventDefault();
+          stopDraw();
+          clearCursor();
+        });
+        maskCanvas.addEventListener("touchmove", (e) => {
+          e.preventDefault();
+          if (drawing) draw(e.touches[0]);
+          else drawCursor(e.touches[0]);
+        });
+
+        resetBtn.addEventListener("click", () => {
+          if (!originalImageSrc) {
+            statusEl.textContent = "No original image available.";
+            return;
+          }
+          baseImageForOutpaint = null;
+          contentRectForOutpaint = null;
+          outpaintMode = false;
+          updateOutpaintButton();
+
+          loadImageFromSrc(originalImageSrc, {
+            scaleMode: "fit",
+            maskMode: "fullBlack"
+          });
+          statusEl.textContent = "Reset back to the original image.";
+        });
+
+        downloadBtn.addEventListener("click", () => {
+          if (!imageLoaded) return;
+
+          const cropCanvas = document.createElement("canvas");
+          cropCanvas.width = drawWidth;
+          cropCanvas.height = drawHeight;
+          const cropCtx = cropCanvas.getContext("2d");
+
+          cropCtx.drawImage(
+            imageCanvas,
+            drawOffsetX,
+            drawOffsetY,
+            drawWidth,
+            drawHeight,
+            0,
+            0,
+            drawWidth,
+            drawHeight
+          );
+
+          cropCanvas.toBlob((blob) => {
+            if (!blob) return;
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = "image.png";
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+          }, "image/png");
+        });
+
+        editBtn.addEventListener("click", async () => {
+          if (!imageLoaded || !allowEdit) {
+            if (!allowEdit) {
+              alert(
+                "Inpainting is only allowed for whitelisted image hosts (see status line)."
+              );
+            }
+            return;
+          }
+
+          const prompt = promptInput.value.trim();
+          if (!prompt) {
+            alert("Please enter a prompt.");
+            return;
+          }
+
+          editBtn.disabled = true;
+          resetBtn.disabled = true;
+          downloadBtn.disabled = true;
+          statusEl.textContent = "Sending image…";
+
+          try {
+            const imageBlob = await new Promise((resolve) =>
+              imageCanvas.toBlob(resolve, "image/png")
+            );
+            const maskBlob = await new Promise((resolve) =>
+              maskCanvas.toBlob(resolve, "image/png")
+            );
+
+            const formData = new FormData();
+            formData.append("prompt", prompt);
+            formData.append("image", imageBlob, "image.png");
+            formData.append("mask", maskBlob, "mask.png");
+
+            if (originalImageSrc) {
+              formData.append("origin", originalImageSrc);
+            }
+
+            if (engineSelect.value) {
+              formData.append("engineId", engineSelect.value);
+            }
+
+            const res = await fetch("/api/edit", {
+              method: "POST",
+              body: formData
+            });
+
+            if (!res.ok) {
+              const err = await res.json().catch(() => ({}));
+              const msg =
+                err.error === "not_whitelisted"
+                  ? err.message ||
+                    "This image host or path is not whitelisted for inpainting."
+                  : err.error || "Error while editing";
+              throw new Error(msg);
+            }
+
+            const data = await res.json();
+            statusEl.textContent = "Response received…";
+
+            const editedImg = new Image();
+            editedImg.onload = () => {
+              const tmpCanvas = document.createElement("canvas");
+              tmpCanvas.width = CANVAS_SIZE;
+              tmpCanvas.height = CANVAS_SIZE;
+              const tmpCtx = tmpCanvas.getContext("2d");
+              tmpCtx.drawImage(editedImg, 0, 0, CANVAS_SIZE, CANVAS_SIZE);
+
+              if (outpaintMode) {
+                const nextDataUrl = tmpCanvas.toDataURL("image/png");
+                statusEl.textContent =
+                  "Done (outpainting). Result is shown in the canvas.";
+
+                baseImageForOutpaint = null;
+                contentRectForOutpaint = null;
+                outpaintMode = false;
+                updateOutpaintButton();
+
+                loadImageFromSrc(nextDataUrl, {
+                  scaleMode: "fit",
+                  maskMode: "fullBlack"
+                });
+              } else {
+                const cropCanvas = document.createElement("canvas");
+                cropCanvas.width = drawWidth;
+                cropCanvas.height = drawHeight;
+                const cropCtx = cropCanvas.getContext("2d");
+
+                cropCtx.drawImage(
+                  tmpCanvas,
+                  drawOffsetX,
+                  drawOffsetY,
+                  drawWidth,
+                  drawHeight,
+                  0,
+                  0,
+                  drawWidth,
+                  drawHeight
+                );
+
+                const nextDataUrl = cropCanvas.toDataURL("image/png");
+                statusEl.textContent =
+                  "Done (inpainting). Result is shown in the canvas.";
+
+                loadImageFromSrc(nextDataUrl, {
+                  scaleMode: "fit",
+                  maskMode: "fullBlack"
+                });
+              }
+            };
+
+            editedImg.onerror = (e) => {
+              console.error("Error loading AI image:", e);
+              statusEl.textContent = "Error loading AI image.";
+            };
+
+            editedImg.src = data.url;
+          } catch (err) {
+            console.error(err);
+            statusEl.textContent = "Error: " + err.message;
+          } finally {
+            editBtn.disabled = false;
+            resetBtn.disabled = false;
+            downloadBtn.disabled = false;
+            recomputeAccessState();
+          }
+        });
+
+        initCanvases();
+
+        (function loadFromQueryUrl() {
+          const params = new URLSearchParams(window.location.search);
+          const imageUrl =
+            params.get("image") || params.get("src") || params.get("url");
+          if (!imageUrl) {
+            statusEl.textContent =
+              "No image URL found. Call this page with ?src=…";
+            return;
+          }
+
+          originalImageSrc = imageUrl;
+          baseImageForOutpaint = null;
+          contentRectForOutpaint = null;
+          outpaintMode = false;
+          updateOutpaintButton();
+
+          try {
+            const u = new URL(imageUrl);
+            originHost = u.host;
+          } catch {
+            originHost = null;
+          }
+
+          statusEl.textContent = "Loading image from URL…";
+          loadImageFromSrc(imageUrl, {
+            scaleMode: "fit",
+            maskMode: "fullBlack"
+          });
+        })();
+
+        fetchConfig();
+      </script>
+    </div>
+  </body>
+</html>
