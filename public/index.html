@@ -33,7 +33,12 @@
         position: relative;
         border: 1px solid #333;
         border-radius: 8px;
-        background: radial-gradient(circle at top, #222 0, #111 55%, #0a0a0a 100%);
+        background: radial-gradient(
+          circle at top,
+          #222 0,
+          #111 55%,
+          #0a0a0a 100%
+        );
         overflow: hidden;
       }
       .canvas-inner {
@@ -161,6 +166,23 @@
         padding: 0.15rem 0.5rem;
       }
 
+      #status {
+        font-size: 0.78rem;
+        color: #c0c0c0;
+      }
+
+      /* NEW: persistent publish badge (not overwritten by recomputeAccessState) */
+      #publishNotice {
+        display: none;
+        font-size: 0.75rem;
+        padding: 0.12rem 0.45rem;
+        border-radius: 999px;
+        border: 1px solid rgba(0, 170, 255, 0.35);
+        background: rgba(0, 170, 255, 0.09);
+        color: #9ddcff;
+        white-space: nowrap;
+      }
+
       .buttons {
         display: flex;
         gap: 0.3rem;
@@ -173,47 +195,25 @@
         background: linear-gradient(135deg, #0af, #6cf);
         color: #000;
         font-size: 0.9rem;
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        min-width: 2rem;
-        transition: transform 0.08s ease, box-shadow 0.08s ease,
-          background 0.12s ease;
-        box-shadow: 0 0 0 0 rgba(0, 170, 255, 0.4);
+        font-weight: 600;
       }
       button.secondary {
-        background: #262626;
+        background: #1a1a1a;
         color: #eee;
-        box-shadow: none;
-      }
-      button:hover:not(:disabled) {
-        transform: translateY(-1px);
-        box-shadow: 0 4px 10px rgba(0, 170, 255, 0.35);
-      }
-      button.secondary:hover:not(:disabled) {
-        box-shadow: 0 3px 8px rgba(0, 0, 0, 0.5);
+        border: 1px solid #333;
+        font-weight: 500;
       }
       button:disabled {
-        opacity: 0.5;
-        cursor: default;
-        transform: none;
-        box-shadow: none;
-      }
-
-      #status {
-        font-size: 0.75rem;
-        color: #aaa;
-        min-height: 1.2em;
+        opacity: 0.45;
+        cursor: not-allowed;
       }
 
       .hint-card {
-        margin-top: 0.6rem;
-        padding: 0.7rem 0.8rem;
-        background: radial-gradient(circle at top left, #202020 0, #121212 60%);
-        border-radius: 8px;
-        border: 1px solid #2c2c2c;
-        font-size: 0.78rem;
-        color: #c0c0c0;
+        margin-top: 0.55rem;
+        border: 1px solid #232323;
+        background: #0f0f0f;
+        border-radius: 10px;
+        padding: 0.55rem 0.6rem;
       }
       .hint-header {
         display: flex;
@@ -262,6 +262,7 @@
       }
     </style>
   </head>
+
   <body>
     <div class="app">
       <h1>In-/Outpainting Tool</h1>
@@ -307,11 +308,13 @@
             </div>
 
             <span id="status"></span>
+
+            <!-- NEW: persistent "sent/publish" badge -->
+            <span id="publishNotice">✅ Sent</span>
           </div>
+
           <div class="buttons">
-            <button id="editBtn" title="Run in-/outpainting">
-              ✏️
-            </button>
+            <button id="editBtn" title="Run in-/outpainting">✏️</button>
             <button
               id="modeBtn"
               class="secondary"
@@ -340,6 +343,16 @@
             >
               ⬇
             </button>
+
+            <!-- only visible if ?id=... is present -->
+            <button
+              id="publishBtn"
+              class="secondary"
+              title="Send current image to API (requires ?id=...)"
+              style="display:none;"
+            >
+              📨
+            </button>
           </div>
         </div>
 
@@ -353,16 +366,17 @@
               <span class="hint-icon">1️⃣</span>
               <span>
                 <span class="hint-text-strong">Load an image</span><br />
-                Call this page with <span class="hint-sub">?src=&lt;image-url&gt;</span>. The
-                image must come from an allowed host.
+                Call this page with
+                <span class="hint-sub">?src=&lt;image-url&gt;</span>. The image
+                must come from an allowed host.
               </span>
             </li>
             <li>
               <span class="hint-icon">2️⃣</span>
               <span>
                 <span class="hint-text-strong">Inpainting (✏️ + ◎)</span><br />
-                Use the brush to reveal the areas you want the AI to change. Dark
-                areas are protected.
+                Use the brush to reveal the areas you want the AI to change.
+                Dark areas are protected.
               </span>
             </li>
             <li>
@@ -402,7 +416,9 @@
         const outBtn = document.getElementById("outBtn");
         const resetBtn = document.getElementById("resetBtn");
         const downloadBtn = document.getElementById("downloadBtn");
+        const publishBtn = document.getElementById("publishBtn");
         const statusEl = document.getElementById("status");
+        const publishNotice = document.getElementById("publishNotice");
         const brushSizeSlider = document.getElementById("brushSize");
         const brushSizeLabel = document.getElementById("brushSizeLabel");
         const engineSelect = document.getElementById("engineSelect");
@@ -421,7 +437,7 @@
         let drawHeight = 0;
 
         let originalImageSrc = null;
-        let maskMode = "erase";
+        let maskMode = "erase"; // erase => transparent strokes = "edit areas"
         let outpaintMode = false;
         let baseImageForOutpaint = null;
         let contentRect = { x: 0, y: 0, w: CANVAS_SIZE, h: CANVAS_SIZE };
@@ -431,6 +447,27 @@
         let originHost = null;
         let allowEdit = false;
         let configLoaded = false;
+
+        // callback id from URL
+        let callbackId = null;
+
+        function setPublishNotice(text, isError) {
+          if (!text) {
+            publishNotice.style.display = "none";
+            return;
+          }
+          publishNotice.textContent = text;
+          publishNotice.style.display = "inline";
+          if (isError) {
+            publishNotice.style.borderColor = "rgba(255, 80, 80, 0.5)";
+            publishNotice.style.background = "rgba(255, 80, 80, 0.12)";
+            publishNotice.style.color = "#ffd2d2";
+          } else {
+            publishNotice.style.borderColor = "rgba(0, 170, 255, 0.35)";
+            publishNotice.style.background = "rgba(0, 170, 255, 0.09)";
+            publishNotice.style.color = "#9ddcff";
+          }
+        }
 
         function initCanvases() {
           imageCanvas.width = CANVAS_SIZE;
@@ -444,7 +481,6 @@
         function updateBrushLabel() {
           brushSizeLabel.textContent = `${brushSize} px`;
         }
-
         brushSizeSlider.addEventListener("input", () => {
           brushSize = parseInt(brushSizeSlider.value, 10) || 25;
           updateBrushLabel();
@@ -478,64 +514,65 @@
         updateOutpaintButton();
 
         modeBtn.addEventListener("click", () => {
-          if (outpaintMode) {
-            statusEl.textContent =
-              "Outpainting is active – the brush is disabled. Turn off outpainting to paint.";
-            return;
-          }
-          maskMode = maskMode === "erase" ? "restore" : "erase";
+          maskMode = maskMode === "erase" ? "protect" : "erase";
           updateMaskModeButton();
         });
 
         outBtn.addEventListener("click", () => {
           if (!imageLoaded) return;
 
-          if (!outpaintMode) {
-            outpaintMode = true;
-            updateOutpaintButton();
+          outpaintMode = !outpaintMode;
+          updateOutpaintButton();
+
+          if (outpaintMode) {
             baseImageForOutpaint = imageCanvas.toDataURL("image/png");
-            contentRectForOutpaint = { ...contentRect };
+
+            contentRectForOutpaint = {
+              x: drawOffsetX,
+              y: drawOffsetY,
+              w: drawWidth,
+              h: drawHeight
+            };
 
             loadImageFromSrc(baseImageForOutpaint, {
               scaleMode: "shrinkForOutpaint",
-              maskMode: "borderOutpaint",
-              contentRectForMask: contentRectForOutpaint
-            });
-          } else {
-            outpaintMode = false;
-            updateOutpaintButton();
-
-            const src =
-              baseImageForOutpaint || imageCanvas.toDataURL("image/png");
-            baseImageForOutpaint = null;
-            contentRectForOutpaint = null;
-
-            loadImageFromSrc(src, {
-              scaleMode: "fit",
               maskMode: "fullBlack"
             });
+
+            statusEl.textContent = "Outpainting mode enabled.";
+          } else {
+            if (originalImageSrc) {
+              loadImageFromSrc(originalImageSrc, {
+                scaleMode: "fit",
+                maskMode: "fullBlack"
+              });
+            }
+            statusEl.textContent = "Inpainting mode enabled.";
           }
         });
 
         function recomputeAccessState() {
-          const normalizedHost = originHost ? originHost.toLowerCase() : null;
-          const normalizedWhitelist = hostsWhitelist.map((h) =>
-            String(h).toLowerCase()
-          );
+          allowEdit = false;
 
-          const isTrusted =
-            normalizedHost && normalizedWhitelist.includes(normalizedHost);
+          if (!configLoaded) {
+            statusEl.textContent = "Loading configuration…";
+            editBtn.disabled = true;
+            return;
+          }
 
-          allowEdit = !!(imageLoaded && isTrusted);
+          if (!originHost) {
+            statusEl.textContent = "No image host detected.";
+            editBtn.disabled = true;
+            return;
+          }
 
-          editBtn.disabled = !allowEdit;
+          const isTrusted = hostsWhitelist
+            .map((h) => String(h || "").toLowerCase())
+            .includes(String(originHost || "").toLowerCase());
 
-          if (!imageLoaded) {
-            statusEl.textContent = "Waiting for image…";
-          } else if (!originHost) {
-            statusEl.textContent =
-              "Image loaded, but host could not be determined – editing disabled.";
-          } else if (!isTrusted) {
+          allowEdit = !!isTrusted;
+
+          if (!isTrusted) {
             statusEl.textContent =
               "Image host '" +
               originHost +
@@ -544,15 +581,16 @@
             statusEl.textContent =
               "Host '" + originHost + "' is whitelisted – inpainting enabled.";
           }
+
+          editBtn.disabled = !allowEdit || !imageLoaded;
         }
 
         async function fetchConfig() {
           try {
             const res = await fetch("/api/config");
-            if (!res.ok) {
-              throw new Error("Config request failed");
-            }
+            if (!res.ok) throw new Error("Config request failed");
             const data = await res.json();
+
             hostsWhitelist = data.hostsWhitelist || [];
             configLoaded = true;
 
@@ -574,9 +612,8 @@
                 opt.textContent = e.label || e.id;
                 engineSelect.appendChild(opt);
               }
-              if (defaultEngineId) {
-                engineSelect.value = defaultEngineId;
-              }
+              engineSelect.disabled = false;
+              if (defaultEngineId) engineSelect.value = defaultEngineId;
             }
 
             recomputeAccessState();
@@ -591,6 +628,22 @@
             statusEl.textContent =
               "Error while loading configuration (see console).";
           }
+        }
+
+        function setMaskFullBlack() {
+          maskCtx.setTransform(1, 0, 0, 1, 0, 0);
+          maskCtx.globalCompositeOperation = "source-over";
+          maskCtx.fillStyle = "rgba(0,0,0,1)";
+          maskCtx.clearRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
+          maskCtx.fillRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
+          maskCtx.beginPath();
+        }
+
+        function setMaskFullTransparent() {
+          maskCtx.setTransform(1, 0, 0, 1, 0, 0);
+          maskCtx.globalCompositeOperation = "source-over";
+          maskCtx.clearRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
+          maskCtx.beginPath();
         }
 
         function loadImageFromSrc(src, options = {}) {
@@ -643,45 +696,20 @@
                 w: drawWidth,
                 h: drawHeight
               };
-            }
-
-            maskCtx.setTransform(1, 0, 0, 1, 0, 0);
-            maskCtx.globalCompositeOperation = "source-over";
-            maskCtx.clearRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
-
-            if (maskMode === "borderOutpaint") {
-              const inner =
-                contentRectForMask || {
-                  x: 0,
-                  y: 0,
-                  w: img.width,
-                  h: img.height
-                };
-
-              const sx = drawWidth / img.width;
-              const sy = drawHeight / img.height;
-
-              let innerX = drawOffsetX + inner.x * sx;
-              let innerY = drawOffsetY + inner.y * sy;
-              let innerW = inner.w * sx;
-              let innerH = inner.h * sy;
-
-              innerX += OUTPAINT_FEATHER;
-              innerY += OUTPAINT_FEATHER;
-              innerW -= OUTPAINT_FEATHER * 2;
-              innerH -= OUTPAINT_FEATHER * 2;
-
-              if (innerW < 0) innerW = 0;
-              if (innerH < 0) innerH = 0;
-
-              maskCtx.fillStyle = "rgba(0, 0, 0, 1)";
-              maskCtx.fillRect(innerX, innerY, innerW, innerH);
+            } else if (contentRectForMask) {
+              contentRect = contentRectForMask;
             } else {
-              maskCtx.fillStyle = "rgba(0, 0, 0, 1)";
-              maskCtx.fillRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
+              contentRect = {
+                x: drawOffsetX,
+                y: drawOffsetY,
+                w: drawWidth,
+                h: drawHeight
+              };
             }
 
-            cursorCtx.clearRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
+            if (maskMode === "fullBlack") setMaskFullBlack();
+            else if (maskMode === "fullTransparent") setMaskFullTransparent();
+            else setMaskFullBlack();
 
             overlayHint.classList.add("hidden");
             controlsEl.style.display = "flex";
@@ -779,6 +807,8 @@
         });
 
         resetBtn.addEventListener("click", () => {
+          setPublishNotice("", false);
+
           if (!originalImageSrc) {
             statusEl.textContent = "No original image available.";
             return;
@@ -828,7 +858,98 @@
           }, "image/png");
         });
 
+        async function storeCurrentViewAndGetUrl() {
+          if (!imageLoaded) throw new Error("No image loaded.");
+
+          const cropCanvas = document.createElement("canvas");
+          cropCanvas.width = drawWidth;
+          cropCanvas.height = drawHeight;
+          const cropCtx = cropCanvas.getContext("2d");
+
+          cropCtx.drawImage(
+            imageCanvas,
+            drawOffsetX,
+            drawOffsetY,
+            drawWidth,
+            drawHeight,
+            0,
+            0,
+            drawWidth,
+            drawHeight
+          );
+
+          const blob = await new Promise((resolve) =>
+            cropCanvas.toBlob(resolve, "image/png")
+          );
+          if (!blob) throw new Error("Could not create PNG blob.");
+
+          const fd = new FormData();
+          fd.append("image", blob, "current.png");
+
+          const res = await fetch("/api/store", { method: "POST", body: fd });
+          if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            throw new Error(err.error || "Store failed");
+          }
+
+          const data = await res.json();
+          if (!data || !data.url) throw new Error("Store returned no url");
+          return new URL(data.url, window.location.origin).toString();
+        }
+
+        publishBtn.addEventListener("click", async () => {
+          if (!callbackId) return;
+          if (!originalImageSrc) {
+            statusEl.textContent = "No original src available.";
+            return;
+          }
+
+          setPublishNotice("⏳ Sending…", false);
+
+          publishBtn.disabled = true;
+          editBtn.disabled = true;
+          resetBtn.disabled = true;
+          downloadBtn.disabled = true;
+
+          try {
+            statusEl.textContent = "Storing current view…";
+            const editedAbsUrl = await storeCurrentViewAndGetUrl();
+
+            statusEl.textContent = "Publishing to API…";
+            const res = await fetch("/api/publish", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                id: callbackId,
+                originalUrl: originalImageSrc,
+                editedUrl: editedAbsUrl
+              })
+            });
+
+            if (!res.ok) {
+              const err = await res.json().catch(() => ({}));
+              throw new Error(err.error || "Publish failed");
+            }
+
+            setPublishNotice("✅ Sent", false);
+            statusEl.textContent = "Published ✅";
+          } catch (e) {
+            console.error(e);
+            setPublishNotice("❌ Send failed", true);
+            statusEl.textContent =
+              "Publish error: " + (e && e.message ? e.message : String(e));
+          } finally {
+            publishBtn.disabled = !callbackId;
+            editBtn.disabled = false;
+            resetBtn.disabled = false;
+            downloadBtn.disabled = false;
+            recomputeAccessState();
+          }
+        });
+
         editBtn.addEventListener("click", async () => {
+          setPublishNotice("", false);
+
           if (!imageLoaded || !allowEdit) {
             if (!allowEdit) {
               alert(
@@ -847,6 +968,8 @@
           editBtn.disabled = true;
           resetBtn.disabled = true;
           downloadBtn.disabled = true;
+          if (callbackId) publishBtn.disabled = true;
+
           statusEl.textContent = "Sending image…";
 
           try {
@@ -952,6 +1075,7 @@
             editBtn.disabled = false;
             resetBtn.disabled = false;
             downloadBtn.disabled = false;
+            publishBtn.disabled = !callbackId;
             recomputeAccessState();
           }
         });
@@ -963,9 +1087,14 @@
           const imageUrl =
             params.get("image") || params.get("src") || params.get("url");
           if (!imageUrl) {
-            statusEl.textContent =
-              "No image URL found. Call this page with ?src=…";
+            statusEl.textContent = "No image URL found. Call this page with ?src=…";
             return;
+          }
+
+          callbackId = params.get("id") || null;
+          if (callbackId) {
+            publishBtn.style.display = "inline-flex";
+            publishBtn.disabled = false;
           }
 
           originalImageSrc = imageUrl;
