@@ -5,7 +5,7 @@
  *          validation; serves results and basic metadata. Includes
  *          /api/store and /api/publish, plus /results/* UI redirect
  *          when ?id=... is present, and allows /api/edit for self-
- *          hosted /results origins.
+ *          hosted /results origins. Supports multi-user auth.
  ********************************************************************/
 
 /********************************************************************
@@ -47,6 +47,12 @@ function getConfig(configPath) {
       authHeader: "Authorization",
       authToken: "",
     },
+    auth: {
+      enabled: false,
+      users: [],
+      password: "",
+      tokenTtlMinutes: 720,
+    },
   };
 
   try {
@@ -61,6 +67,7 @@ function getConfig(configPath) {
       },
       engines: Array.isArray(parsed.engines) ? parsed.engines : defaults.engines,
       callbackApi: { ...defaults.callbackApi, ...(parsed.callbackApi || {}) },
+      auth: { ...defaults.auth, ...(parsed.auth || {}) },
     };
   } catch {
     return defaults;
@@ -248,6 +255,78 @@ function getCallbackEnabled(config) {
 }
 
 /********************************************************************
+ * functionSignature: getAuthUsers(config)
+ * purpose: Returns normalized auth users from env and config.
+ ********************************************************************/
+function getAuthUsers(config) {
+  const cfg = config && config.auth ? config.auth : {};
+
+  const fromEnvUser =
+    process.env.INPAINT_AUTH_USERNAME ||
+    process.env.INPAINT_USERNAME ||
+    process.env.AUTH_USERNAME;
+
+  const fromEnvPass =
+    process.env.INPAINT_AUTH_PASSWORD ||
+    process.env.INPAINT_PASSWORD ||
+    process.env.AUTH_PASSWORD;
+
+  const out = [];
+
+  if (fromEnvPass) {
+    out.push({
+      username: String(fromEnvUser || "default").trim(),
+      password: String(fromEnvPass).trim(),
+    });
+  }
+
+  if (Array.isArray(cfg.users)) {
+    for (const u of cfg.users) {
+      const username = String(u && u.username ? u.username : "").trim();
+      const password = String(u && u.password ? u.password : "").trim();
+      if (username && password) out.push({ username, password });
+    }
+  }
+
+  const legacy = String(cfg.password || "").trim();
+  if (legacy) out.push({ username: "default", password: legacy });
+
+  const unique = [];
+  const seen = new Set();
+  for (const u of out) {
+    const key = `${u.username}::${u.password}`;
+    if (!seen.has(key)) {
+      unique.push(u);
+      seen.add(key);
+    }
+  }
+
+  return unique;
+}
+
+/********************************************************************
+ * functionSignature: getAuthEnabled(config)
+ * purpose: Returns true if password protection is enabled.
+ ********************************************************************/
+function getAuthEnabled(config) {
+  const cfg = config && config.auth ? config.auth : {};
+  const enabledFlag = cfg.enabled !== false;
+  const users = getAuthUsers(config);
+  return !!(enabledFlag && users.length);
+}
+
+/********************************************************************
+ * functionSignature: getAuthTtlMinutes(config)
+ * purpose: Returns token TTL in minutes.
+ ********************************************************************/
+function getAuthTtlMinutes(config) {
+  const cfg = config && config.auth ? config.auth : {};
+  const n = Number(cfg.tokenTtlMinutes);
+  if (!Number.isFinite(n) || n <= 0) return 720;
+  return Math.min(24 * 60 * 7, Math.floor(n));
+}
+
+/********************************************************************
  * functionSignature: getServer()
  * purpose: Creates and starts the HTTP server.
  ********************************************************************/
@@ -259,6 +338,68 @@ function getServer() {
 
   const app = express();
   const upload = multer({ dest: UPLOAD_DIR });
+
+  const authTokens = new Map();
+
+  /********************************************************************
+   * functionSignature: getTokenFromRequest(req)
+   * purpose: Extracts auth token from headers.
+   ********************************************************************/
+  function getTokenFromRequest(req) {
+    const direct = String(req.headers["x-inpaint-auth"] || "").trim();
+    if (direct) return direct;
+
+    const auth = String(req.headers["authorization"] || "").trim();
+    if (!auth) return "";
+
+    const m = auth.match(/^Bearer\s+(.+)$/i);
+    return String((m && m[1]) || "").trim();
+  }
+
+  /********************************************************************
+   * functionSignature: getIsTokenValid(token)
+   * purpose: Returns true if token exists and is not expired.
+   ********************************************************************/
+  function getIsTokenValid(token) {
+    const t = String(token || "").trim();
+    if (!t) return false;
+
+    const entry = authTokens.get(t);
+    if (!entry) return false;
+
+    const now = Date.now();
+    if (entry.expiresAtMs && now > entry.expiresAtMs) {
+      authTokens.delete(t);
+      return false;
+    }
+
+    return true;
+  }
+
+  /********************************************************************
+   * functionSignature: getIsAuthed(req)
+   * purpose: Returns true if request carries a valid token.
+   ********************************************************************/
+  function getIsAuthed(req) {
+    const token = getTokenFromRequest(req);
+    return getIsTokenValid(token);
+  }
+
+  /********************************************************************
+   * functionSignature: issueToken(config, username)
+   * purpose: Issues a new auth token and stores it with expiry.
+   ********************************************************************/
+  function issueToken(config, username) {
+    const token = `t_${Date.now()}_${Math.random()
+      .toString(16)
+      .slice(2)}_${Math.random().toString(16).slice(2)}`;
+
+    const ttlMin = getAuthTtlMinutes(config);
+    const expiresAtMs = Date.now() + ttlMin * 60 * 1000;
+
+    authTokens.set(token, { expiresAtMs, username: String(username || "") });
+    return { token, expiresAtMs };
+  }
 
   app.set("trust proxy", true);
   app.use(express.json());
@@ -296,7 +437,9 @@ function getServer() {
 
       if (ref.includes("/?src=") || ref.includes("/index.html")) return next();
 
-      const proto = String(req.headers["x-forwarded-proto"] || req.protocol || "http");
+      const proto = String(
+        req.headers["x-forwarded-proto"] || req.protocol || "http"
+      );
       const host = String(req.headers["x-forwarded-host"] || req.get("host") || "");
       if (!host) return next();
 
@@ -324,6 +467,8 @@ function getServer() {
       engines: getEnginePublicSummary(config),
       defaultEngineId: getDefaultEngineId(config),
       callbackApiEnabled: getCallbackEnabled(config),
+      supportsUnlock: getAuthEnabled(config),
+      supportsUpload: getAuthEnabled(config),
     });
   }
 
@@ -339,6 +484,8 @@ function getServer() {
       engines: getEnginePublicSummary(config),
       defaultEngineId: getDefaultEngineId(config),
       callbackApiEnabled: getCallbackEnabled(config),
+      supportsUnlock: getAuthEnabled(config),
+      supportsUpload: getAuthEnabled(config),
       imageWhitelist: {
         hosts: (config.imageWhitelist && config.imageWhitelist.hosts) || [],
         paths: (config.imageWhitelist && config.imageWhitelist.paths) || [],
@@ -356,10 +503,13 @@ function getServer() {
     const origin = req.body.origin || "";
     const allowed =
       getIsOriginWhitelisted(config, origin) ||
-      getIsSelfResultsOriginAllowed(req, origin);
+      getIsSelfResultsOriginAllowed(req, origin) ||
+      getIsAuthed(req);
 
     res.json({
       allowed,
+      supportsUnlock: getAuthEnabled(config),
+      supportsUpload: getAuthEnabled(config),
       engines: getEnginePublicSummary(config),
       defaultEngineId: getDefaultEngineId(config),
     });
@@ -368,7 +518,97 @@ function getServer() {
   app.post("/api/can-edit", handleCanEdit);
 
   /********************************************************************
-   * functionSignature: handleStore(upload.single("image"))(req, res)
+   * functionSignature: handleUnlock(req, res)
+   * purpose: Validates username/password and issues an auth token.
+   ********************************************************************/
+  function handleUnlock(req, res) {
+    const enabled = getAuthEnabled(config);
+    if (!enabled) return res.status(404).json({ error: "unlock_disabled" });
+
+    const username = String(req.body?.username || "").trim();
+    const password = String(req.body?.password || "").trim();
+
+    if (!username || !password) {
+      return res.status(400).json({ error: "username_password_required" });
+    }
+
+    const users = getAuthUsers(config);
+    const ok = users.some(
+      (u) => u.username === username && u.password === password
+    );
+
+    if (!ok) {
+      return res.status(401).json({ error: "invalid_credentials" });
+    }
+
+    const issued = issueToken(config, username);
+    return res.json({ token: issued.token, expiresAtMs: issued.expiresAtMs });
+  }
+
+  app.post("/api/unlock", handleUnlock);
+
+  /********************************************************************
+   * functionSignature: handleValidateToken(req, res)
+   * purpose: Validates token from headers.
+   ********************************************************************/
+  function handleValidateToken(req, res) {
+    const enabled = getAuthEnabled(config);
+    if (!enabled) return res.json({ valid: false });
+
+    const token = getTokenFromRequest(req);
+    const valid = getIsTokenValid(token);
+
+    return res.json({ valid });
+  }
+
+  app.post("/api/validate-token", handleValidateToken);
+
+  /********************************************************************
+   * functionSignature: handleUploadLocal(req, res)
+   * purpose: Stores a local upload into /public/results (auth required).
+   ********************************************************************/
+  function handleUploadLocal(req, res) {
+    const enabled = getAuthEnabled(config);
+    if (!enabled) return res.status(404).json({ error: "upload_disabled" });
+
+    if (!getIsAuthed(req)) {
+      if (req.file && req.file.path) {
+        try {
+          fs.unlinkSync(req.file.path);
+        } catch {}
+      }
+      return res.status(401).json({ error: "unauthorized" });
+    }
+
+    const imageFile = req.file;
+    if (!imageFile) return res.status(400).json({ error: "image_required" });
+
+    const original = String(imageFile.originalname || "").toLowerCase();
+    const ext = path.extname(original);
+    const safeExt = /\.(png|jpe?g|webp|gif|bmp)$/i.test(ext) ? ext : ".png";
+
+    const filename = `upload-${Date.now()}${safeExt}`;
+    const outPath = path.join(RESULTS_DIR, filename);
+
+    try {
+      fs.renameSync(imageFile.path, outPath);
+      return res.json({ url: `/results/${filename}` });
+    } catch (e) {
+      try {
+        fs.unlinkSync(imageFile.path);
+      } catch {}
+
+      return res.status(500).json({
+        error: "upload_failed",
+        details: String((e && e.message) || e),
+      });
+    }
+  }
+
+  app.post("/api/upload-local", upload.single("image"), handleUploadLocal);
+
+  /********************************************************************
+   * functionSignature: handleStore(req, res)
    * purpose: Stores an uploaded image into /public/results and returns
    *          a public URL (/results/...).
    ********************************************************************/
@@ -465,17 +705,21 @@ function getServer() {
     const maskFile = req.files?.mask?.[0];
 
     if (!imageFile || !maskFile) {
-      return res.status(400).json({ error: "Both 'image' and 'mask' are required." });
+      return res
+        .status(400)
+        .json({ error: "Both 'image' and 'mask' are required." });
     }
 
     const allowedByWhitelist = getIsOriginWhitelisted(config, origin);
     const allowedBySelfResults = getIsSelfResultsOriginAllowed(req, origin);
+    const allowedByAuth = getIsAuthed(req);
 
-    if (!allowedByWhitelist && !allowedBySelfResults) {
+    if (!allowedByWhitelist && !allowedBySelfResults && !allowedByAuth) {
       setCleanupTempFiles(imageFile, maskFile);
       return res.status(403).json({
         error: "not_whitelisted",
-        message: "The provided image origin is not allowed for inpainting.",
+        message:
+          "The provided image origin is not allowed for inpainting (whitelist or unlock required).",
       });
     }
 

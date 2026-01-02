@@ -171,7 +171,6 @@
         color: #c0c0c0;
       }
 
-      /* NEW: persistent publish badge (not overwritten by recomputeAccessState) */
       #publishNotice {
         display: none;
         font-size: 0.75rem;
@@ -181,6 +180,18 @@
         background: rgba(0, 170, 255, 0.09);
         color: #9ddcff;
         white-space: nowrap;
+      }
+
+      #apiError {
+        display: none;
+        margin-top: 0.25rem;
+        padding: 0.45rem 0.55rem;
+        border-radius: 10px;
+        border: 1px solid rgba(255, 80, 80, 0.45);
+        background: rgba(255, 80, 80, 0.10);
+        color: #ffd2d2;
+        font-size: 0.82rem;
+        line-height: 1.25;
       }
 
       .buttons {
@@ -278,7 +289,7 @@
           <span>Open the page with a URL parameter, for example:</span>
           <span><strong>?src=https://…/image.png</strong></span>
           <span>Once the image is visible, you can paint your mask.</span>
-          <span>Inpainting is only available for whitelisted image hosts.</span>
+          <span>Inpainting is only available for allowed image origins.</span>
         </div>
       </div>
 
@@ -292,13 +303,7 @@
           <div class="left-controls">
             <div class="slider-wrap">
               <span title="Brush size">🖌</span>
-              <input
-                type="range"
-                id="brushSize"
-                min="5"
-                max="80"
-                value="25"
-              />
+              <input type="range" id="brushSize" min="5" max="80" value="25" />
               <span id="brushSizeLabel">25 px</span>
             </div>
 
@@ -308,8 +313,6 @@
             </div>
 
             <span id="status"></span>
-
-            <!-- NEW: persistent "sent/publish" badge -->
             <span id="publishNotice">✅ Sent</span>
           </div>
 
@@ -330,6 +333,13 @@
               ▣
             </button>
             <button
+              id="viewBtn"
+              class="secondary"
+              title="View mode: hide/show the mask overlay"
+            >
+              🕶
+            </button>
+            <button
               id="resetBtn"
               class="secondary"
               title="Reset back to the original image"
@@ -343,8 +353,21 @@
             >
               ⬇
             </button>
-
-            <!-- only visible if ?id=... is present -->
+            <button
+              id="unlockBtn"
+              class="secondary"
+              title="Unlock editing and local upload with credentials"
+            >
+              🔒
+            </button>
+            <button
+              id="uploadBtn"
+              class="secondary"
+              title="Upload a local image (requires unlock)"
+              disabled
+            >
+              📤
+            </button>
             <button
               id="publishBtn"
               class="secondary"
@@ -356,6 +379,8 @@
           </div>
         </div>
 
+        <div id="apiError"></div>
+
         <div class="hint-card">
           <div class="hint-header">
             <div class="hint-title">Quick guide</div>
@@ -366,43 +391,45 @@
               <span class="hint-icon">1️⃣</span>
               <span>
                 <span class="hint-text-strong">Load an image</span><br />
-                Call this page with
-                <span class="hint-sub">?src=&lt;image-url&gt;</span>. The image
-                must come from an allowed host.
+                Call this page with <span class="hint-sub">?src=&lt;image-url&gt;</span>.
               </span>
             </li>
             <li>
               <span class="hint-icon">2️⃣</span>
               <span>
                 <span class="hint-text-strong">Inpainting (✏️ + ◎)</span><br />
-                Use the brush to reveal the areas you want the AI to change.
-                Dark areas are protected.
+                Use the brush to reveal the areas you want the AI to change. Dark areas are protected.
               </span>
             </li>
             <li>
               <span class="hint-icon">3️⃣</span>
               <span>
                 <span class="hint-text-strong">Outpainting (⛶)</span><br />
-                Shrinks the image and lets the AI extend the borders with smooth
-                transitions. The brush is disabled in this mode.
+                Shrinks the image and lets the AI extend the borders with smooth transitions. The brush is disabled in this mode.
               </span>
             </li>
             <li>
               <span class="hint-icon">4️⃣</span>
               <span>
-                <span class="hint-text-strong">Host restrictions</span><br />
-                If the image host is not whitelisted, the ✏️ button stays
-                disabled and the tool acts as a viewer only.
+                <span class="hint-text-strong">View mode (🕶)</span><br />
+                Hides the mask overlay. If the image origin is not allowed, view mode is forced until you unlock.
               </span>
             </li>
           </ul>
         </div>
       </div>
 
+      <input
+        id="fileInput"
+        type="file"
+        accept="image/png,image/jpeg,image/webp,image/gif,image/bmp"
+        style="display:none;"
+      />
+
       <script>
         const CANVAS_SIZE = 1024;
         const OUTPAINT_SCALE = 0.8;
-        const OUTPAINT_FEATHER = 4;
+        const OUTPAINT_OVERLAP = 32;
 
         const canvasArea = document.getElementById("canvasArea");
         const imageCanvas = document.getElementById("imageCanvas");
@@ -414,11 +441,16 @@
         const editBtn = document.getElementById("editBtn");
         const modeBtn = document.getElementById("modeBtn");
         const outBtn = document.getElementById("outBtn");
+        const viewBtn = document.getElementById("viewBtn");
         const resetBtn = document.getElementById("resetBtn");
         const downloadBtn = document.getElementById("downloadBtn");
+        const unlockBtn = document.getElementById("unlockBtn");
+        const uploadBtn = document.getElementById("uploadBtn");
+        const fileInput = document.getElementById("fileInput");
         const publishBtn = document.getElementById("publishBtn");
         const statusEl = document.getElementById("status");
         const publishNotice = document.getElementById("publishNotice");
+        const apiErrorEl = document.getElementById("apiError");
         const brushSizeSlider = document.getElementById("brushSize");
         const brushSizeLabel = document.getElementById("brushSizeLabel");
         const engineSelect = document.getElementById("engineSelect");
@@ -437,20 +469,29 @@
         let drawHeight = 0;
 
         let originalImageSrc = null;
-        let maskMode = "erase"; // erase => transparent strokes = "edit areas"
+        let workingImageSrc = null;
+        let maskMode = "erase";
         let outpaintMode = false;
-        let baseImageForOutpaint = null;
-        let contentRect = { x: 0, y: 0, w: CANVAS_SIZE, h: CANVAS_SIZE };
-        let contentRectForOutpaint = null;
 
         let hostsWhitelist = [];
         let originHost = null;
-        let allowEdit = false;
         let configLoaded = false;
+        let supportsUnlock = false;
 
-        // callback id from URL
+        let authToken = "";
+        let tokenValid = false;
+
+        let allowEdit = false;
+
         let callbackId = null;
 
+        let viewModeEnabled = false;
+        let viewModeForced = false;
+
+        /********************************************************************
+         * functionSignature: setPublishNotice(text, isError)
+         * purpose: Shows a small publish status badge.
+         ********************************************************************/
         function setPublishNotice(text, isError) {
           if (!text) {
             publishNotice.style.display = "none";
@@ -469,6 +510,43 @@
           }
         }
 
+        /********************************************************************
+         * functionSignature: setApiError(text)
+         * purpose: Displays API errors on the page.
+         ********************************************************************/
+        function setApiError(text) {
+          const t = String(text || "").trim();
+          if (!t) {
+            apiErrorEl.style.display = "none";
+            apiErrorEl.textContent = "";
+            return;
+          }
+          apiErrorEl.textContent = t;
+          apiErrorEl.style.display = "block";
+        }
+
+        /********************************************************************
+         * functionSignature: clearApiError()
+         * purpose: Clears the API error box.
+         ********************************************************************/
+        function clearApiError() {
+          setApiError("");
+        }
+
+        /********************************************************************
+         * functionSignature: setWorkingImageSrc(src)
+         * purpose: Stores the current working image state source (last committed).
+         ********************************************************************/
+        function setWorkingImageSrc(src) {
+          const s = String(src || "").trim();
+          if (!s) return;
+          workingImageSrc = s;
+        }
+
+        /********************************************************************
+         * functionSignature: initCanvases()
+         * purpose: Initializes all canvases to the fixed tool size.
+         ********************************************************************/
         function initCanvases() {
           imageCanvas.width = CANVAS_SIZE;
           imageCanvas.height = CANVAS_SIZE;
@@ -478,15 +556,27 @@
           cursorCanvas.height = CANVAS_SIZE;
         }
 
+        /********************************************************************
+         * functionSignature: updateBrushLabel()
+         * purpose: Updates the brush size label.
+         ********************************************************************/
         function updateBrushLabel() {
           brushSizeLabel.textContent = `${brushSize} px`;
         }
-        brushSizeSlider.addEventListener("input", () => {
+
+        /********************************************************************
+         * functionSignature: handleBrushSizeInput()
+         * purpose: Tracks brush size changes.
+         ********************************************************************/
+        function handleBrushSizeInput() {
           brushSize = parseInt(brushSizeSlider.value, 10) || 25;
           updateBrushLabel();
-        });
-        updateBrushLabel();
+        }
 
+        /********************************************************************
+         * functionSignature: updateMaskModeButton()
+         * purpose: Updates the mask mode button icon/tooltip.
+         ********************************************************************/
         function updateMaskModeButton() {
           if (maskMode === "erase") {
             modeBtn.title = "Mask mode: reveal areas to be edited";
@@ -496,95 +586,219 @@
             modeBtn.textContent = "◉";
           }
         }
-        updateMaskModeButton();
 
+        /********************************************************************
+         * functionSignature: updateOutpaintButton()
+         * purpose: Updates the outpaint button icon/tooltip.
+         ********************************************************************/
         function updateOutpaintButton() {
           if (outpaintMode) {
             outBtn.textContent = "⛶";
             outBtn.title =
               "Image mode: outpainting (image shrinks, borders are extended by the AI, brush disabled)";
-            maskCanvas.style.pointerEvents = "none";
           } else {
             outBtn.textContent = "▣";
             outBtn.title =
               "Image mode: inpainting (only within the original image, brush enabled)";
-            maskCanvas.style.pointerEvents = "auto";
+          }
+          applyMaskInteractivity();
+        }
+
+        /********************************************************************
+         * functionSignature: getIsTrustedHost()
+         * purpose: Returns true if the origin host is in the host whitelist.
+         ********************************************************************/
+        function getIsTrustedHost() {
+          if (!originHost) return false;
+          const low = String(originHost || "").toLowerCase();
+          return (hostsWhitelist || [])
+            .map((h) => String(h || "").toLowerCase())
+            .includes(low);
+        }
+
+        /********************************************************************
+         * functionSignature: getPreferredViewMode()
+         * purpose: Reads view mode preference from session storage.
+         ********************************************************************/
+        function getPreferredViewMode() {
+          const raw = String(
+            window.sessionStorage.getItem("inpaintViewMode") || ""
+          ).trim();
+          return raw === "1";
+        }
+
+        /********************************************************************
+         * functionSignature: setPreferredViewMode(enabled)
+         * purpose: Persists view mode preference to session storage.
+         ********************************************************************/
+        function setPreferredViewMode(enabled) {
+          window.sessionStorage.setItem("inpaintViewMode", enabled ? "1" : "0");
+        }
+
+        /********************************************************************
+         * functionSignature: applyViewModeUi()
+         * purpose: Applies view mode settings (mask visibility and UI).
+         ********************************************************************/
+        function applyViewModeUi() {
+          if (viewModeEnabled) {
+            maskCanvas.style.opacity = "0";
+            cursorCanvas.style.opacity = "0";
+            viewBtn.textContent = "👁";
+            viewBtn.title = "View mode enabled (mask hidden). Click to show mask.";
+          } else {
+            maskCanvas.style.opacity = "0.6";
+            cursorCanvas.style.opacity = "1";
+            viewBtn.textContent = "🕶";
+            viewBtn.title = "View mode disabled (mask visible). Click to hide mask.";
+          }
+          applyMaskInteractivity();
+        }
+
+        /********************************************************************
+         * functionSignature: setViewMode(enabled, forced)
+         * purpose: Sets view mode and optionally locks it.
+         ********************************************************************/
+        function setViewMode(enabled, forced) {
+          viewModeEnabled = !!enabled;
+          viewModeForced = !!forced;
+
+          viewBtn.disabled = !!viewModeForced || !imageLoaded || !allowEdit;
+
+          applyViewModeUi();
+        }
+
+        /********************************************************************
+         * functionSignature: applyMaskInteractivity()
+         * purpose: Enables/disables painting based on state.
+         ********************************************************************/
+        function applyMaskInteractivity() {
+          const canPaint = !!(imageLoaded && allowEdit && !outpaintMode && !viewModeEnabled);
+          maskCanvas.style.pointerEvents = canPaint ? "auto" : "none";
+          if (!canPaint) {
+            cursorCtx.clearRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
           }
         }
-        updateOutpaintButton();
 
-        modeBtn.addEventListener("click", () => {
-          maskMode = maskMode === "erase" ? "protect" : "erase";
-          updateMaskModeButton();
-        });
-
-        outBtn.addEventListener("click", () => {
-          if (!imageLoaded) return;
-
-          outpaintMode = !outpaintMode;
-          updateOutpaintButton();
-
-          if (outpaintMode) {
-            baseImageForOutpaint = imageCanvas.toDataURL("image/png");
-
-            contentRectForOutpaint = {
-              x: drawOffsetX,
-              y: drawOffsetY,
-              w: drawWidth,
-              h: drawHeight
-            };
-
-            loadImageFromSrc(baseImageForOutpaint, {
-              scaleMode: "shrinkForOutpaint",
-              maskMode: "fullBlack"
-            });
-
-            statusEl.textContent = "Outpainting mode enabled.";
-          } else {
-            if (originalImageSrc) {
-              loadImageFromSrc(originalImageSrc, {
-                scaleMode: "fit",
-                maskMode: "fullBlack"
-              });
-            }
-            statusEl.textContent = "Inpainting mode enabled.";
-          }
-        });
-
+        /********************************************************************
+         * functionSignature: recomputeAccessState()
+         * purpose: Computes current access and updates UI.
+         ********************************************************************/
         function recomputeAccessState() {
-          allowEdit = false;
-
           if (!configLoaded) {
             statusEl.textContent = "Loading configuration…";
             editBtn.disabled = true;
+            modeBtn.disabled = true;
+            outBtn.disabled = true;
+            uploadBtn.disabled = true;
+            viewBtn.disabled = true;
+            updateUnlockButton();
             return;
           }
 
-          if (!originHost) {
-            statusEl.textContent = "No image host detected.";
-            editBtn.disabled = true;
-            return;
-          }
+          const isTrusted = getIsTrustedHost();
+          const forcedView = !!(imageLoaded && originHost && !allowEdit && !tokenValid);
 
-          const isTrusted = hostsWhitelist
-            .map((h) => String(h || "").toLowerCase())
-            .includes(String(originHost || "").toLowerCase());
-
-          allowEdit = !!isTrusted;
-
-          if (!isTrusted) {
+          if (!imageLoaded) {
             statusEl.textContent =
-              "Image host '" +
-              originHost +
-              "' is not whitelisted – view only, inpainting disabled.";
+              "No image loaded. Unlock to upload a local image, or open with ?src=…";
+          } else if (forcedView) {
+            statusEl.textContent =
+              "Image origin is not allowed – view only. Unlock to enable all functions.";
+          } else if (!allowEdit && originHost) {
+            statusEl.textContent =
+              "Editing disabled. Unlock or use an allowed origin.";
+          } else if (allowEdit) {
+            statusEl.textContent =
+              "Editing enabled (" + (tokenValid ? "unlocked" : "allowed") + ").";
+          }
+
+          editBtn.disabled = !(allowEdit && imageLoaded);
+          modeBtn.disabled = !(allowEdit && imageLoaded) || outpaintMode || viewModeEnabled;
+          outBtn.disabled = !(allowEdit && imageLoaded);
+          resetBtn.disabled = !imageLoaded;
+          downloadBtn.disabled = !imageLoaded;
+
+          uploadBtn.disabled = !(supportsUnlock && tokenValid);
+
+          if (forcedView) {
+            setViewMode(true, true);
           } else {
-            statusEl.textContent =
-              "Host '" + originHost + "' is whitelisted – inpainting enabled.";
+            if (viewModeForced) {
+              const pref = getPreferredViewMode();
+              setViewMode(pref, false);
+            } else {
+              viewBtn.disabled = !imageLoaded || !allowEdit;
+              applyViewModeUi();
+            }
           }
 
-          editBtn.disabled = !allowEdit || !imageLoaded;
+          updateUnlockButton();
         }
 
+        /********************************************************************
+         * functionSignature: updateUnlockButton()
+         * purpose: Updates the unlock button icon/tooltip.
+         ********************************************************************/
+        function updateUnlockButton() {
+          if (!supportsUnlock) {
+            unlockBtn.style.display = "none";
+            uploadBtn.style.display = "none";
+            return;
+          }
+
+          unlockBtn.style.display = "inline-flex";
+          uploadBtn.style.display = "inline-flex";
+
+          if (tokenValid) {
+            unlockBtn.textContent = "🔓";
+            unlockBtn.title = "Unlocked (session). Click to lock this session.";
+          } else {
+            unlockBtn.textContent = "🔒";
+            unlockBtn.title = "Unlock editing and local upload with credentials";
+          }
+        }
+
+        /********************************************************************
+         * functionSignature: getAuthHeaders()
+         * purpose: Returns auth headers if token is valid.
+         ********************************************************************/
+        function getAuthHeaders() {
+          const headers = {};
+          if (tokenValid && authToken) headers["x-inpaint-auth"] = authToken;
+          return headers;
+        }
+
+        /********************************************************************
+         * functionSignature: refreshCanEditFromServer()
+         * purpose: Asks the server whether this origin can be edited.
+         ********************************************************************/
+        async function refreshCanEditFromServer() {
+          if (!originalImageSrc) {
+            allowEdit = false;
+            recomputeAccessState();
+            return;
+          }
+
+          try {
+            const res = await fetch("/api/can-edit", {
+              method: "POST",
+              headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+              body: JSON.stringify({ origin: originalImageSrc }),
+            });
+
+            const data = await res.json().catch(() => ({}));
+            allowEdit = !!data.allowed;
+          } catch {
+            allowEdit = false;
+          }
+
+          recomputeAccessState();
+        }
+
+        /********************************************************************
+         * functionSignature: fetchConfig()
+         * purpose: Loads server config (whitelist/engines/capabilities).
+         ********************************************************************/
         async function fetchConfig() {
           try {
             const res = await fetch("/api/config");
@@ -592,6 +806,7 @@
             const data = await res.json();
 
             hostsWhitelist = data.hostsWhitelist || [];
+            supportsUnlock = !!data.supportsUnlock;
             configLoaded = true;
 
             const engines = data.engines || [];
@@ -618,18 +833,196 @@
 
             recomputeAccessState();
           } catch (e) {
-            console.error("Failed to load config:", e);
             engineSelect.innerHTML = "";
             const opt = document.createElement("option");
             opt.value = "";
             opt.textContent = "Config error";
             engineSelect.appendChild(opt);
             engineSelect.disabled = true;
-            statusEl.textContent =
-              "Error while loading configuration (see console).";
+            statusEl.textContent = "Error while loading configuration.";
+            setApiError("Config error: " + String((e && e.message) || e));
           }
         }
 
+        /********************************************************************
+         * functionSignature: validateTokenFromSession()
+         * purpose: Loads token from session storage and validates it.
+         ********************************************************************/
+        async function validateTokenFromSession() {
+          const t = String(
+            window.sessionStorage.getItem("inpaintAuthToken") || ""
+          ).trim();
+          authToken = t;
+
+          if (!t) {
+            tokenValid = false;
+            updateUnlockButton();
+            return false;
+          }
+
+          try {
+            const res = await fetch("/api/validate-token", {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "x-inpaint-auth": t,
+              },
+              body: "{}",
+            });
+
+            const data = await res.json().catch(() => ({}));
+            tokenValid = !!data.valid;
+
+            if (!tokenValid) {
+              window.sessionStorage.removeItem("inpaintAuthToken");
+              authToken = "";
+            }
+
+            updateUnlockButton();
+            return tokenValid;
+          } catch {
+            tokenValid = false;
+            updateUnlockButton();
+            return false;
+          }
+        }
+
+        /********************************************************************
+         * functionSignature: lockSession()
+         * purpose: Clears the current auth session token.
+         ********************************************************************/
+        function lockSession() {
+          window.sessionStorage.removeItem("inpaintAuthToken");
+          authToken = "";
+          tokenValid = false;
+          updateUnlockButton();
+          refreshCanEditFromServer();
+        }
+
+        /********************************************************************
+         * functionSignature: unlockWithCredentials()
+         * purpose: Prompts for username/password and requests a token.
+         ********************************************************************/
+        async function unlockWithCredentials() {
+          if (!supportsUnlock) return false;
+
+          clearApiError();
+
+          if (tokenValid) {
+            const ok = window.confirm("Lock this session (remove unlock token)?");
+            if (ok) lockSession();
+            return tokenValid;
+          }
+
+          const username = window.prompt("Username:");
+          if (!username) return false;
+
+          const password = window.prompt("Password:");
+          if (!password) return false;
+
+          try {
+            const res = await fetch("/api/unlock", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ username, password }),
+            });
+
+            const data = await res.json().catch(() => ({}));
+
+            if (!res.ok) {
+              tokenValid = false;
+              updateUnlockButton();
+              setApiError(
+                "Unlock failed: " + String(data.error || "invalid_credentials")
+              );
+              return false;
+            }
+
+            const token = String(data.token || "").trim();
+            if (!token) {
+              tokenValid = false;
+              updateUnlockButton();
+              setApiError("Unlock failed: no token returned.");
+              return false;
+            }
+
+            window.sessionStorage.setItem("inpaintAuthToken", token);
+            await validateTokenFromSession();
+            await refreshCanEditFromServer();
+            return tokenValid;
+          } catch (e) {
+            tokenValid = false;
+            updateUnlockButton();
+            setApiError("Unlock error: " + String((e && e.message) || e));
+            return false;
+          }
+        }
+
+        /********************************************************************
+         * functionSignature: uploadLocalFile(file)
+         * purpose: Uploads a local image to /results (requires unlock).
+         ********************************************************************/
+        async function uploadLocalFile(file) {
+          if (!file) return;
+
+          clearApiError();
+
+          if (!tokenValid) {
+            const ok = await unlockWithCredentials();
+            if (!ok) return;
+          }
+
+          const fd = new FormData();
+          fd.append("image", file, file.name || "upload.png");
+
+          statusEl.textContent = "Uploading…";
+          uploadBtn.disabled = true;
+
+          try {
+            const res = await fetch("/api/upload-local", {
+              method: "POST",
+              headers: { ...getAuthHeaders() },
+              body: fd,
+            });
+
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) {
+              throw new Error(String(data.error || "upload_failed"));
+            }
+
+            const url = data && data.url ? data.url : "";
+            if (!url) throw new Error("upload_returned_no_url");
+
+            const abs = new URL(url, window.location.origin).toString();
+
+            originalImageSrc = abs;
+            setWorkingImageSrc(abs);
+            outpaintMode = false;
+            updateOutpaintButton();
+
+            try {
+              const u = new URL(abs);
+              originHost = u.host;
+            } catch {
+              originHost = null;
+            }
+
+            statusEl.textContent = "Loading uploaded image…";
+            loadImageFromSrc(abs, { scaleMode: "fit", maskMode: "fullBlack" });
+            await refreshCanEditFromServer();
+          } catch (e) {
+            statusEl.textContent =
+              "Upload error: " + String((e && e.message) || e);
+            setApiError(statusEl.textContent);
+          } finally {
+            recomputeAccessState();
+          }
+        }
+
+        /********************************************************************
+         * functionSignature: setMaskFullBlack()
+         * purpose: Resets the mask to full black (protect everything).
+         ********************************************************************/
         function setMaskFullBlack() {
           maskCtx.setTransform(1, 0, 0, 1, 0, 0);
           maskCtx.globalCompositeOperation = "source-over";
@@ -639,6 +1032,10 @@
           maskCtx.beginPath();
         }
 
+        /********************************************************************
+         * functionSignature: setMaskFullTransparent()
+         * purpose: Clears the mask fully (edit everything).
+         ********************************************************************/
         function setMaskFullTransparent() {
           maskCtx.setTransform(1, 0, 0, 1, 0, 0);
           maskCtx.globalCompositeOperation = "source-over";
@@ -646,14 +1043,46 @@
           maskCtx.beginPath();
         }
 
+        
+        /********************************************************************
+         * functionSignature: setMaskForOutpaintDefault()
+         * purpose: Initializes mask for outpainting by protecting the inner
+         *          portion of the drawn image and leaving border + overlap
+         *          transparent (editable) for seamless blending.
+         ********************************************************************/
+        function setMaskForOutpaintDefault() {
+          const overlap = Math.max(0, Math.floor(OUTPAINT_OVERLAP || 0));
+
+          const x0 = Math.max(0, Math.floor(drawOffsetX + overlap));
+          const y0 = Math.max(0, Math.floor(drawOffsetY + overlap));
+          const x1 = Math.min(CANVAS_SIZE, Math.ceil(drawOffsetX + drawWidth - overlap));
+          const y1 = Math.min(CANVAS_SIZE, Math.ceil(drawOffsetY + drawHeight - overlap));
+
+          const w = Math.max(0, x1 - x0);
+          const h = Math.max(0, y1 - y0);
+
+          maskCtx.setTransform(1, 0, 0, 1, 0, 0);
+          maskCtx.globalCompositeOperation = "source-over";
+
+          maskCtx.clearRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
+
+          if (w > 0 && h > 0) {
+            maskCtx.fillStyle = "rgba(0,0,0,1)";
+            maskCtx.fillRect(x0, y0, w, h);
+          }
+
+          maskCtx.beginPath();
+        }
+
+/********************************************************************
+         * functionSignature: loadImageFromSrc(src, options)
+         * purpose: Loads an image and draws it into the fixed canvas.
+         ********************************************************************/
         function loadImageFromSrc(src, options = {}) {
-          const {
-            scaleMode = "fit",
-            maskMode = "fullBlack",
-            contentRectForMask = null
-          } = options;
+          const { scaleMode = "fit", maskMode = "fullBlack" } = options;
 
           const img = new Image();
+
           img.onload = () => {
             initCanvases();
 
@@ -689,54 +1118,49 @@
               drawHeight
             );
 
-            if (scaleMode === "fit") {
-              contentRect = {
-                x: drawOffsetX,
-                y: drawOffsetY,
-                w: drawWidth,
-                h: drawHeight
-              };
-            } else if (contentRectForMask) {
-              contentRect = contentRectForMask;
-            } else {
-              contentRect = {
-                x: drawOffsetX,
-                y: drawOffsetY,
-                w: drawWidth,
-                h: drawHeight
-              };
-            }
-
-            if (maskMode === "fullBlack") setMaskFullBlack();
+                        if (maskMode === "fullBlack") setMaskFullBlack();
             else if (maskMode === "fullTransparent") setMaskFullTransparent();
+            else if (maskMode === "outpaintDefault") setMaskForOutpaintDefault();
             else setMaskFullBlack();
-
-            overlayHint.classList.add("hidden");
+overlayHint.classList.add("hidden");
             controlsEl.style.display = "flex";
 
             imageLoaded = true;
-            recomputeAccessState();
+
+            const pref = getPreferredViewMode();
+            if (!viewModeForced) viewModeEnabled = pref;
+
+            refreshCanEditFromServer();
           };
 
           img.onerror = () => {
             statusEl.textContent =
               "Error loading image (CORS / same-origin restrictions?).";
+            setApiError(statusEl.textContent);
           };
 
           img.crossOrigin = "anonymous";
           img.src = src;
         }
 
+        /********************************************************************
+         * functionSignature: getCanvasPos(evt)
+         * purpose: Converts a mouse/touch event into canvas coordinates.
+         ********************************************************************/
         function getCanvasPos(evt) {
           const rect = maskCanvas.getBoundingClientRect();
           return {
             x: ((evt.clientX - rect.left) / rect.width) * maskCanvas.width,
-            y: ((evt.clientY - rect.top) / rect.height) * maskCanvas.height
+            y: ((evt.clientY - rect.top) / rect.height) * maskCanvas.height,
           };
         }
 
+        /********************************************************************
+         * functionSignature: drawCursor(evt)
+         * purpose: Draws the circular brush cursor.
+         ********************************************************************/
         function drawCursor(evt) {
-          if (!imageLoaded || outpaintMode) {
+          if (!imageLoaded || outpaintMode || viewModeEnabled || !allowEdit) {
             cursorCtx.clearRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
             return;
           }
@@ -749,23 +1173,44 @@
           cursorCtx.stroke();
         }
 
+        /********************************************************************
+         * functionSignature: clearCursor()
+         * purpose: Clears the cursor canvas.
+         ********************************************************************/
         function clearCursor() {
           cursorCtx.clearRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
         }
 
+        /********************************************************************
+         * functionSignature: startDraw(evt)
+         * purpose: Starts drawing on the mask.
+         ********************************************************************/
         function startDraw(evt) {
-          if (!imageLoaded || outpaintMode) return;
+          if (!imageLoaded) return;
+          if (!allowEdit) return;
+          if (outpaintMode) return;
+          if (viewModeEnabled) return;
+
           drawing = true;
           draw(evt);
         }
 
+        /********************************************************************
+         * functionSignature: stopDraw()
+         * purpose: Stops drawing on the mask.
+         ********************************************************************/
         function stopDraw() {
           drawing = false;
           maskCtx.beginPath();
         }
 
+        /********************************************************************
+         * functionSignature: draw(evt)
+         * purpose: Draws the current brush stroke on the mask.
+         ********************************************************************/
         function draw(evt) {
           if (!drawing) return;
+
           const pos = getCanvasPos(evt);
 
           if (maskMode === "erase") {
@@ -783,49 +1228,139 @@
           drawCursor(evt);
         }
 
-        maskCanvas.addEventListener("mousedown", (e) => startDraw(e));
-        window.addEventListener("mouseup", () => stopDraw());
-        maskCanvas.addEventListener("mousemove", (e) => {
+        /********************************************************************
+         * functionSignature: handleModeBtnClick()
+         * purpose: Toggles between erase/protect mask modes.
+         ********************************************************************/
+        function handleModeBtnClick() {
+          if (!allowEdit || !imageLoaded) return;
+          maskMode = maskMode === "erase" ? "protect" : "erase";
+          updateMaskModeButton();
+        }
+
+        /********************************************************************
+         * functionSignature: handleOutBtnClick()
+         * purpose: Toggles between inpaint and outpaint modes.
+         ********************************************************************/
+        function handleOutBtnClick() {
+          if (!imageLoaded) return;
+          if (!allowEdit) return;
+
+          outpaintMode = !outpaintMode;
+          updateOutpaintButton();
+
+          if (outpaintMode) {
+            const base = imageCanvas.toDataURL("image/png");
+            loadImageFromSrc(base, { scaleMode: "shrinkForOutpaint", maskMode: "outpaintDefault" });
+            statusEl.textContent = "Outpainting mode enabled.";
+          } else {
+            const back = workingImageSrc || originalImageSrc;
+            if (back) {
+              loadImageFromSrc(back, { scaleMode: "fit", maskMode: "fullBlack" });
+            }
+            statusEl.textContent = "Inpainting mode enabled.";
+          }
+        }
+
+        /********************************************************************
+         * functionSignature: handleViewBtnClick()
+         * purpose: Toggles view mode (mask overlay visible/hidden).
+         ********************************************************************/
+        function handleViewBtnClick() {
+          if (!imageLoaded) return;
+          if (!allowEdit) return;
+          if (viewModeForced) return;
+
+          viewModeEnabled = !viewModeEnabled;
+          setPreferredViewMode(viewModeEnabled);
+          applyViewModeUi();
+          recomputeAccessState();
+        }
+
+        /********************************************************************
+         * functionSignature: handleMaskMouseDown(e)
+         * purpose: Starts drawing via mouse.
+         ********************************************************************/
+        function handleMaskMouseDown(e) {
+          startDraw(e);
+        }
+
+        /********************************************************************
+         * functionSignature: handleMaskMouseMove(e)
+         * purpose: Draws or updates cursor via mouse.
+         ********************************************************************/
+        function handleMaskMouseMove(e) {
           if (drawing) draw(e);
           else drawCursor(e);
-        });
-        maskCanvas.addEventListener("mouseleave", () => clearCursor());
+        }
 
-        maskCanvas.addEventListener("touchstart", (e) => {
+        /********************************************************************
+         * functionSignature: handleMaskMouseLeave()
+         * purpose: Clears cursor when leaving canvas.
+         ********************************************************************/
+        function handleMaskMouseLeave() {
+          clearCursor();
+        }
+
+        /********************************************************************
+         * functionSignature: handleTouchStart(e)
+         * purpose: Starts drawing via touch.
+         ********************************************************************/
+        function handleTouchStart(e) {
           e.preventDefault();
+          if (!e.touches || !e.touches[0]) return;
           startDraw(e.touches[0]);
-        });
-        maskCanvas.addEventListener("touchend", (e) => {
+        }
+
+        /********************************************************************
+         * functionSignature: handleTouchEnd(e)
+         * purpose: Stops drawing via touch.
+         ********************************************************************/
+        function handleTouchEnd(e) {
           e.preventDefault();
           stopDraw();
           clearCursor();
-        });
-        maskCanvas.addEventListener("touchmove", (e) => {
+        }
+
+        /********************************************************************
+         * functionSignature: handleTouchMove(e)
+         * purpose: Draws or updates cursor via touch.
+         ********************************************************************/
+        function handleTouchMove(e) {
           e.preventDefault();
+          if (!e.touches || !e.touches[0]) return;
           if (drawing) draw(e.touches[0]);
           else drawCursor(e.touches[0]);
-        });
+        }
 
-        resetBtn.addEventListener("click", () => {
+        /********************************************************************
+         * functionSignature: handleResetClick()
+         * purpose: Resets the view back to the original image.
+         ********************************************************************/
+        function handleResetClick() {
           setPublishNotice("", false);
+          clearApiError();
 
           if (!originalImageSrc) {
             statusEl.textContent = "No original image available.";
             return;
           }
-          baseImageForOutpaint = null;
-          contentRectForOutpaint = null;
+
           outpaintMode = false;
           updateOutpaintButton();
 
-          loadImageFromSrc(originalImageSrc, {
-            scaleMode: "fit",
-            maskMode: "fullBlack"
-          });
+          setWorkingImageSrc(originalImageSrc);
+          loadImageFromSrc(originalImageSrc, { scaleMode: "fit", maskMode: "fullBlack" });
           statusEl.textContent = "Reset back to the original image.";
-        });
+        }
 
-        downloadBtn.addEventListener("click", () => {
+        /********************************************************************
+         * functionSignature: handleDownloadClick()
+         * purpose: Downloads the current canvas content as PNG.
+         ********************************************************************/
+        function handleDownloadClick() {
+          clearApiError();
+
           if (!imageLoaded) return;
 
           const cropCanvas = document.createElement("canvas");
@@ -856,8 +1391,67 @@
             document.body.removeChild(a);
             URL.revokeObjectURL(url);
           }, "image/png");
-        });
+        }
 
+        /********************************************************************
+         * functionSignature: handleUnlockClick()
+         * purpose: Unlocks/locks the tool session.
+         ********************************************************************/
+        async function handleUnlockClick() {
+          await unlockWithCredentials();
+        }
+
+        /********************************************************************
+         * functionSignature: handleUploadClick()
+         * purpose: Opens the file selector after unlock.
+         ********************************************************************/
+        async function handleUploadClick() {
+          if (!supportsUnlock) return;
+          if (!tokenValid) {
+            const ok = await unlockWithCredentials();
+            if (!ok) return;
+          }
+          fileInput.click();
+        }
+
+        /********************************************************************
+         * functionSignature: handleFileInputChange(e)
+         * purpose: Starts uploading the selected file.
+         ********************************************************************/
+        async function handleFileInputChange(e) {
+          const f = e.target.files && e.target.files[0];
+          e.target.value = "";
+          if (!f) return;
+          await uploadLocalFile(f);
+        }
+
+        /********************************************************************
+         * functionSignature: handleDragOver(e)
+         * purpose: Enables drag/drop when unlock is supported.
+         ********************************************************************/
+        function handleDragOver(e) {
+          if (!supportsUnlock) return;
+          e.preventDefault();
+        }
+
+        /********************************************************************
+         * functionSignature: handleDrop(e)
+         * purpose: Handles drag/drop upload.
+         ********************************************************************/
+        async function handleDrop(e) {
+          if (!supportsUnlock) return;
+          e.preventDefault();
+
+          const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+          if (!f) return;
+
+          await uploadLocalFile(f);
+        }
+
+        /********************************************************************
+         * functionSignature: storeCurrentViewAndGetUrl()
+         * purpose: Stores the current image view as /results URL.
+         ********************************************************************/
         async function storeCurrentViewAndGetUrl() {
           if (!imageLoaded) throw new Error("No image loaded.");
 
@@ -887,23 +1481,25 @@
           fd.append("image", blob, "current.png");
 
           const res = await fetch("/api/store", { method: "POST", body: fd });
-          if (!res.ok) {
-            const err = await res.json().catch(() => ({}));
-            throw new Error(err.error || "Store failed");
-          }
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) throw new Error(String(data.error || "store_failed"));
 
-          const data = await res.json();
-          if (!data || !data.url) throw new Error("Store returned no url");
+          if (!data || !data.url) throw new Error("store_returned_no_url");
           return new URL(data.url, window.location.origin).toString();
         }
 
-        publishBtn.addEventListener("click", async () => {
+        /********************************************************************
+         * functionSignature: handlePublishClick()
+         * purpose: Publishes the current image to callback API.
+         ********************************************************************/
+        async function handlePublishClick() {
           if (!callbackId) return;
           if (!originalImageSrc) {
             statusEl.textContent = "No original src available.";
             return;
           }
 
+          clearApiError();
           setPublishNotice("⏳ Sending…", false);
 
           publishBtn.disabled = true;
@@ -922,22 +1518,21 @@
               body: JSON.stringify({
                 id: callbackId,
                 originalUrl: originalImageSrc,
-                editedUrl: editedAbsUrl
-              })
+                editedUrl: editedAbsUrl,
+              }),
             });
 
+            const data = await res.json().catch(() => ({}));
             if (!res.ok) {
-              const err = await res.json().catch(() => ({}));
-              throw new Error(err.error || "Publish failed");
+              throw new Error(String(data.error || "publish_failed"));
             }
 
             setPublishNotice("✅ Sent", false);
             statusEl.textContent = "Published ✅";
           } catch (e) {
-            console.error(e);
             setPublishNotice("❌ Send failed", true);
-            statusEl.textContent =
-              "Publish error: " + (e && e.message ? e.message : String(e));
+            statusEl.textContent = "Publish error: " + String((e && e.message) || e);
+            setApiError(statusEl.textContent);
           } finally {
             publishBtn.disabled = !callbackId;
             editBtn.disabled = false;
@@ -945,29 +1540,31 @@
             downloadBtn.disabled = false;
             recomputeAccessState();
           }
-        });
+        }
 
-        editBtn.addEventListener("click", async () => {
+        /********************************************************************
+         * functionSignature: handleEditClick()
+         * purpose: Sends image+mask to the edit API.
+         ********************************************************************/
+        async function handleEditClick() {
           setPublishNotice("", false);
+          clearApiError();
 
           if (!imageLoaded || !allowEdit) {
-            if (!allowEdit) {
-              alert(
-                "Inpainting is only allowed for whitelisted image hosts (see status line)."
-              );
-            }
+            setApiError("Editing is not allowed for this image origin. Unlock to enable.");
             return;
           }
 
           const prompt = promptInput.value.trim();
           if (!prompt) {
-            alert("Please enter a prompt.");
+            setApiError("Please enter a prompt.");
             return;
           }
 
           editBtn.disabled = true;
           resetBtn.disabled = true;
           downloadBtn.disabled = true;
+          viewBtn.disabled = true;
           if (callbackId) publishBtn.disabled = true;
 
           statusEl.textContent = "Sending image…";
@@ -995,20 +1592,16 @@
 
             const res = await fetch("/api/edit", {
               method: "POST",
-              body: formData
+              headers: { ...getAuthHeaders() },
+              body: formData,
             });
 
+            const data = await res.json().catch(() => ({}));
             if (!res.ok) {
-              const err = await res.json().catch(() => ({}));
-              const msg =
-                err.error === "not_whitelisted"
-                  ? err.message ||
-                    "This image host or path is not whitelisted for inpainting."
-                  : err.error || "Error while editing";
+              const msg = String(data.message || data.error || "edit_failed");
               throw new Error(msg);
             }
 
-            const data = await res.json();
             statusEl.textContent = "Response received…";
 
             const editedImg = new Image();
@@ -1021,18 +1614,13 @@
 
               if (outpaintMode) {
                 const nextDataUrl = tmpCanvas.toDataURL("image/png");
-                statusEl.textContent =
-                  "Done (outpainting). Result is shown in the canvas.";
+                setWorkingImageSrc(nextDataUrl);
+                statusEl.textContent = "Done (outpainting). Result is shown in the canvas.";
 
-                baseImageForOutpaint = null;
-                contentRectForOutpaint = null;
                 outpaintMode = false;
                 updateOutpaintButton();
 
-                loadImageFromSrc(nextDataUrl, {
-                  scaleMode: "fit",
-                  maskMode: "fullBlack"
-                });
+                loadImageFromSrc(nextDataUrl, { scaleMode: "fit", maskMode: "fullBlack" });
               } else {
                 const cropCanvas = document.createElement("canvas");
                 cropCanvas.width = drawWidth;
@@ -1052,54 +1640,61 @@
                 );
 
                 const nextDataUrl = cropCanvas.toDataURL("image/png");
-                statusEl.textContent =
-                  "Done (inpainting). Result is shown in the canvas.";
+                setWorkingImageSrc(nextDataUrl);
+                statusEl.textContent = "Done (inpainting). Result is shown in the canvas.";
 
-                loadImageFromSrc(nextDataUrl, {
-                  scaleMode: "fit",
-                  maskMode: "fullBlack"
-                });
+                loadImageFromSrc(nextDataUrl, { scaleMode: "fit", maskMode: "fullBlack" });
               }
             };
 
-            editedImg.onerror = (e) => {
-              console.error("Error loading AI image:", e);
+            editedImg.onerror = () => {
               statusEl.textContent = "Error loading AI image.";
+              setApiError(statusEl.textContent);
             };
 
             editedImg.src = data.url;
           } catch (err) {
-            console.error(err);
-            statusEl.textContent = "Error: " + err.message;
+            statusEl.textContent = "Error: " + String(err && err.message ? err.message : err);
+            setApiError(statusEl.textContent);
           } finally {
             editBtn.disabled = false;
             resetBtn.disabled = false;
             downloadBtn.disabled = false;
+            viewBtn.disabled = false;
             publishBtn.disabled = !callbackId;
-            recomputeAccessState();
+            refreshCanEditFromServer();
           }
-        });
+        }
 
-        initCanvases();
-
-        (function loadFromQueryUrl() {
+        /********************************************************************
+         * functionSignature: loadFromQueryUrl()
+         * purpose: Reads image source and callback id from URL params.
+         ********************************************************************/
+        function loadFromQueryUrl() {
           const params = new URLSearchParams(window.location.search);
-          const imageUrl =
-            params.get("image") || params.get("src") || params.get("url");
-          if (!imageUrl) {
-            statusEl.textContent = "No image URL found. Call this page with ?src=…";
-            return;
-          }
+          const imageUrl = params.get("image") || params.get("src") || params.get("url");
 
           callbackId = params.get("id") || null;
+
           if (callbackId) {
             publishBtn.style.display = "inline-flex";
             publishBtn.disabled = false;
           }
 
+          if (!imageUrl) {
+            statusEl.textContent =
+              "No image URL found. Unlock to upload a local image, or call this page with ?src=…";
+            overlayHint.classList.remove("hidden");
+            controlsEl.style.display = "flex";
+            imageLoaded = false;
+            allowEdit = false;
+            setViewMode(true, true);
+            recomputeAccessState();
+            return;
+          }
+
           originalImageSrc = imageUrl;
-          baseImageForOutpaint = null;
-          contentRectForOutpaint = null;
+          setWorkingImageSrc(imageUrl);
           outpaintMode = false;
           updateOutpaintButton();
 
@@ -1111,13 +1706,64 @@
           }
 
           statusEl.textContent = "Loading image from URL…";
-          loadImageFromSrc(imageUrl, {
-            scaleMode: "fit",
-            maskMode: "fullBlack"
-          });
-        })();
+          loadImageFromSrc(imageUrl, { scaleMode: "fit", maskMode: "fullBlack" });
+        }
 
-        fetchConfig();
+        /********************************************************************
+         * functionSignature: bindEvents()
+         * purpose: Binds all UI event handlers.
+         ********************************************************************/
+        function bindEvents() {
+          brushSizeSlider.addEventListener("input", handleBrushSizeInput);
+
+          modeBtn.addEventListener("click", handleModeBtnClick);
+          outBtn.addEventListener("click", handleOutBtnClick);
+          viewBtn.addEventListener("click", handleViewBtnClick);
+
+          maskCanvas.addEventListener("mousedown", handleMaskMouseDown);
+          window.addEventListener("mouseup", stopDraw);
+          maskCanvas.addEventListener("mousemove", handleMaskMouseMove);
+          maskCanvas.addEventListener("mouseleave", handleMaskMouseLeave);
+
+          maskCanvas.addEventListener("touchstart", handleTouchStart);
+          maskCanvas.addEventListener("touchend", handleTouchEnd);
+          maskCanvas.addEventListener("touchmove", handleTouchMove);
+
+          resetBtn.addEventListener("click", handleResetClick);
+          downloadBtn.addEventListener("click", handleDownloadClick);
+
+          unlockBtn.addEventListener("click", handleUnlockClick);
+          uploadBtn.addEventListener("click", handleUploadClick);
+          fileInput.addEventListener("change", handleFileInputChange);
+
+          canvasArea.addEventListener("dragover", handleDragOver);
+          canvasArea.addEventListener("drop", handleDrop);
+
+          publishBtn.addEventListener("click", handlePublishClick);
+          editBtn.addEventListener("click", handleEditClick);
+        }
+
+        /********************************************************************
+         * functionSignature: bootstrap()
+         * purpose: Initializes UI, loads config, restores auth, loads image.
+         ********************************************************************/
+        async function bootstrap() {
+          initCanvases();
+          updateBrushLabel();
+          updateMaskModeButton();
+          updateOutpaintButton();
+
+          bindEvents();
+
+          viewModeEnabled = getPreferredViewMode();
+          applyViewModeUi();
+
+          await fetchConfig();
+          await validateTokenFromSession();
+          loadFromQueryUrl();
+        }
+
+        bootstrap();
       </script>
     </div>
   </body>
